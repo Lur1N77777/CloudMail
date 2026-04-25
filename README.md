@@ -11,6 +11,8 @@ A polished mobile admin client for temporary mailbox systems powered by Cloudfla
 [![React Native](https://img.shields.io/badge/React%20Native-0.81-61DAFB.svg)](https://reactnative.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6.svg)](https://www.typescriptlang.org/)
 
+[English](./README.md) · [简体中文](./README.zh-CN.md)
+
 [Download APK](https://github.com/Lur1N77777/CloudMail/releases) · [Build from source](./BUILD.md) · [API notes](./docs/mailbox-api-report.md)
 
 </div>
@@ -132,3 +134,4 @@ Issues and pull requests are welcome. Keep changes focused, run checks before su
 CloudMail is released under the [MIT License](./LICENSE).
 
 The upstream mailbox system is [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email). Check the upstream repository for its own license and terms.
+
