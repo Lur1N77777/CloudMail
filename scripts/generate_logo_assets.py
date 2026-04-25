@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = PROJECT_ROOT / "assets" / "images"
-SOURCE_LOGO = PROJECT_ROOT / "logo.png"
+SOURCE_LOGO = PROJECT_ROOT / "assets" / "source" / "logo.png"
 
 
 def fit_square(image: Image.Image, size: int) -> Image.Image:
@@ -103,3 +103,4 @@ def save_all():
 if __name__ == "__main__":
     save_all()
     print(f"Generated logo assets from {SOURCE_LOGO}")
+

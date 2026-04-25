@@ -11,9 +11,9 @@
 [![React Native](https://img.shields.io/badge/React%20Native-0.81-61DAFB.svg)](https://reactnative.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6.svg)](https://www.typescriptlang.org/)
 
-[简体中文](./README.md) · [English](./README.en.md)
+[简体中文](./README.md) · [English](./docs/README.en.md)
 
-[下载 APK](https://github.com/Lur1N77777/CloudMail/releases) · [从源码构建](./BUILD.md) · [API 说明](./docs/mailbox-api-report.md)
+[下载 APK](https://github.com/Lur1N77777/CloudMail/releases) · [从源码构建](./docs/BUILD.md) · [API 说明](./docs/mailbox-api-report.md)
 
 </div>
 
@@ -57,7 +57,7 @@ CloudMail 面向兼容 [cloudflare_temp_email](https://github.com/dreamhunter233
 
 感谢 [dreamhunter2333](https://github.com/dreamhunter2333) 和上游项目贡献者提供 Cloudflare 临时邮箱系统与相关 API 行为。CloudMail 在此基础上补充移动端管理员客户端体验。
 
-更多致谢信息见 [NOTICE](./NOTICE)。
+更多致谢信息见 [NOTICE](./docs/NOTICE.md)。
 
 ## 技术栈
 
@@ -181,7 +181,7 @@ cp .env.example .env.local
 
 ## 构建 Android APK
 
-完整说明见 [BUILD.md](./BUILD.md)。
+完整说明见 [BUILD.md](./docs/BUILD.md)。
 
 常用本地构建流程：
 
@@ -196,12 +196,12 @@ cd android
 
 ## 项目文档
 
-- [构建与安装指南](./BUILD.md)
+- [构建与安装指南](./docs/BUILD.md)
 - [设计说明](./docs/design.md)
 - [邮箱 API 报告](./docs/mailbox-api-report.md)
 - [路线图](./docs/roadmap.md)
-- [安全策略](./SECURITY.md)
-- [贡献指南](./CONTRIBUTING.md)
+- [安全策略](./.github/SECURITY.md)
+- [贡献指南](./.github/CONTRIBUTING.md)
 
 ## 贡献
 

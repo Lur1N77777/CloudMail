@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./assets/images/icon.png" alt="CloudMail logo" width="96" height="96" />
+  <img src="../assets/images/icon.png" alt="CloudMail logo" width="96" height="96" />
 
 # CloudMail
 
@@ -11,9 +11,9 @@ A polished mobile admin client for temporary mailbox systems powered by Cloudfla
 [![React Native](https://img.shields.io/badge/React%20Native-0.81-61DAFB.svg)](https://reactnative.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6.svg)](https://www.typescriptlang.org/)
 
-[English](./README.en.md) · [简体中文](./README.md)
+[English](./README.en.md) · [简体中文](../README.md)
 
-[Download APK](https://github.com/Lur1N77777/CloudMail/releases) · [Build from source](./BUILD.md) · [API notes](./docs/mailbox-api-report.md)
+[Download APK](https://github.com/Lur1N77777/CloudMail/releases) · [Build from source](./BUILD.md) · [API notes](./mailbox-api-report.md)
 
 </div>
 
@@ -40,10 +40,10 @@ Click any thumbnail to open the full-size image.
 
 | Preview | Description |
 | --- | --- |
-| <a href="./docs/screenshots/admin-dashboard.jpg"><img src="./docs/screenshots/admin-dashboard.jpg" width="220" alt="Admin dashboard" /></a> | **Admin dashboard** — a compact overview of managed addresses, matched inbox mail, sent mail, and unknown-recipient messages, with quick refresh and tab navigation. |
-| <a href="./docs/screenshots/compose-mail.jpg"><img src="./docs/screenshots/compose-mail.jpg" width="220" alt="Compose mail screen" /></a> | **Compose mail** — send email from a selected mailbox identity, with sender, recipient, subject, and content fields organized for mobile use. |
-| <a href="./docs/screenshots/settings-server.jpg"><img src="./docs/screenshots/settings-server.jpg" width="220" alt="Server settings" /></a> | **Server settings** — configure the Cloudflare Worker endpoint, optional admin password, site password, and auto-refresh interval. |
-| <a href="./docs/screenshots/settings-appearance.jpg"><img src="./docs/screenshots/settings-appearance.jpg" width="220" alt="Appearance settings" /></a> | **Appearance and app settings** — switch refresh intervals and theme mode, then test the connection or check the current app version. |
+| <a href="./screenshots/admin-dashboard.jpg"><img src="./screenshots/admin-dashboard.jpg" width="220" alt="Admin dashboard" /></a> | **Admin dashboard** — a compact overview of managed addresses, matched inbox mail, sent mail, and unknown-recipient messages, with quick refresh and tab navigation. |
+| <a href="./screenshots/compose-mail.jpg"><img src="./screenshots/compose-mail.jpg" width="220" alt="Compose mail screen" /></a> | **Compose mail** — send email from a selected mailbox identity, with sender, recipient, subject, and content fields organized for mobile use. |
+| <a href="./screenshots/settings-server.jpg"><img src="./screenshots/settings-server.jpg" width="220" alt="Server settings" /></a> | **Server settings** — configure the Cloudflare Worker endpoint, optional admin password, site password, and auto-refresh interval. |
+| <a href="./screenshots/settings-appearance.jpg"><img src="./screenshots/settings-appearance.jpg" width="220" alt="Appearance settings" /></a> | **Appearance and app settings** — switch refresh intervals and theme mode, then test the connection or check the current app version. |
 
 ## Download
 
@@ -57,7 +57,7 @@ CloudMail is designed for mailbox systems compatible with [cloudflare_temp_email
 
 Credit goes to [dreamhunter2333](https://github.com/dreamhunter2333) and contributors of the upstream project for the Cloudflare temporary email system and API behavior that this app targets.
 
-See [NOTICE](./NOTICE) for attribution details.
+See [NOTICE](./NOTICE.md) for attribution details.
 
 ## Tech stack
 
@@ -197,11 +197,11 @@ The generated APK should be uploaded to GitHub Releases instead of committed to 
 ## Project docs
 
 - [Build and installation guide](./BUILD.md)
-- [Design notes](./docs/design.md)
-- [Mailbox API report](./docs/mailbox-api-report.md)
-- [Roadmap](./docs/roadmap.md)
-- [Security policy](./SECURITY.md)
-- [Contributing guide](./CONTRIBUTING.md)
+- [Design notes](./design.md)
+- [Mailbox API report](./mailbox-api-report.md)
+- [Roadmap](./roadmap.md)
+- [Security policy](../.github/SECURITY.md)
+- [Contributing guide](../.github/CONTRIBUTING.md)
 
 ## Contributing
 
@@ -209,7 +209,7 @@ Issues and pull requests are welcome. Keep changes focused, run checks before su
 
 ## License
 
-CloudMail is released under the [MIT License](./LICENSE).
+CloudMail is released under the [MIT License](../LICENSE).
 
 The upstream mailbox system is [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email). Check the upstream repository for its own license and terms.
 
