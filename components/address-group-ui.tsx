@@ -1,12 +1,16 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
+  type KeyboardEvent,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 
@@ -22,6 +26,41 @@ type GroupTone = {
   borderColor: string;
   textColor: string;
 };
+
+function useSheetKeyboardLayout(visible: boolean) {
+  const { height } = useWindowDimensions();
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useEffect(() => {
+    if (!visible) {
+      setKeyboardHeight(0);
+      return;
+    }
+
+    const handleShow = (event: KeyboardEvent) => {
+      setKeyboardHeight(Math.max(0, event.endCoordinates.height));
+    };
+    const handleHide = () => setKeyboardHeight(0);
+    const showEvent =
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent =
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const showSubscription = Keyboard.addListener(showEvent, handleShow);
+    const hideSubscription = Keyboard.addListener(hideEvent, handleHide);
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [visible]);
+
+  const keyboardInset = visible ? keyboardHeight : 0;
+  return {
+    keyboardInset,
+    sheetMaxHeight:
+      keyboardInset > 0 ? Math.max(220, height - keyboardInset - 72) : undefined,
+  };
+}
 
 export function resolveAddressGroupTone(
   color: AddressGroupColor,
@@ -150,6 +189,7 @@ export function AddressGroupFilterSheet({
     () => [...groups].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")),
     [groups]
   );
+  const keyboardLayout = useSheetKeyboardLayout(visible);
 
   const renderOption = (
     filter: "all" | "ungrouped" | string,
@@ -194,9 +234,25 @@ export function AddressGroupFilterSheet({
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.overlay}>
-        <View style={[styles.sheet, { backgroundColor: colors.background }]}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View
+        style={[
+          styles.overlay,
+          keyboardLayout.keyboardInset > 0
+            ? { paddingBottom: keyboardLayout.keyboardInset + 12 }
+            : null,
+        ]}
+      >
+        <Pressable style={styles.overlayBackdrop} onPress={onClose} />
+        <View
+          style={[
+            styles.sheet,
+            keyboardLayout.sheetMaxHeight
+              ? { maxHeight: keyboardLayout.sheetMaxHeight }
+              : null,
+            { backgroundColor: colors.background, borderColor: colors.border },
+          ]}
+        >
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderCopy}>
               <Text style={[styles.sheetTitle, { color: colors.foreground }]}>筛选分组</Text>
@@ -209,7 +265,13 @@ export function AddressGroupFilterSheet({
             </Pressable>
           </View>
 
-          <ScrollView contentContainerStyle={styles.sheetBody} keyboardShouldPersistTaps="handled">
+          <ScrollView
+            contentContainerStyle={[
+              styles.sheetBody,
+              keyboardLayout.keyboardInset > 0 ? styles.sheetBodyKeyboard : null,
+            ]}
+            keyboardShouldPersistTaps="handled"
+          >
             <View
               style={[
                 styles.card,
@@ -368,11 +430,28 @@ export function AddressGroupManagerSheet({
     () => [...groups].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")),
     [groups]
   );
+  const keyboardLayout = useSheetKeyboardLayout(visible);
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.overlay}>
-        <View style={[styles.sheet, { backgroundColor: colors.background }]}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View
+        style={[
+          styles.overlay,
+          keyboardLayout.keyboardInset > 0
+            ? { paddingBottom: keyboardLayout.keyboardInset + 12 }
+            : null,
+        ]}
+      >
+        <Pressable style={styles.overlayBackdrop} onPress={onClose} />
+        <View
+          style={[
+            styles.sheet,
+            keyboardLayout.sheetMaxHeight
+              ? { maxHeight: keyboardLayout.sheetMaxHeight }
+              : null,
+            { backgroundColor: colors.background, borderColor: colors.border },
+          ]}
+        >
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderCopy}>
               <Text style={[styles.sheetTitle, { color: colors.foreground }]}>邮箱分组</Text>
@@ -385,7 +464,13 @@ export function AddressGroupManagerSheet({
             </Pressable>
           </View>
 
-          <ScrollView contentContainerStyle={styles.sheetBody} keyboardShouldPersistTaps="handled">
+          <ScrollView
+            contentContainerStyle={[
+              styles.sheetBody,
+              keyboardLayout.keyboardInset > 0 ? styles.sheetBodyKeyboard : null,
+            ]}
+            keyboardShouldPersistTaps="handled"
+          >
             <View
               style={[
                 styles.card,
@@ -542,11 +627,28 @@ export function AddressGroupAssignmentSheet({
   const [name, setName] = useState("");
   const [color, setColor] = useState<AddressGroupColor>("blue");
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const keyboardLayout = useSheetKeyboardLayout(visible);
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.overlay}>
-        <View style={[styles.sheet, { backgroundColor: colors.background }]}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View
+        style={[
+          styles.overlay,
+          keyboardLayout.keyboardInset > 0
+            ? { paddingBottom: keyboardLayout.keyboardInset + 12 }
+            : null,
+        ]}
+      >
+        <Pressable style={styles.overlayBackdrop} onPress={onClose} />
+        <View
+          style={[
+            styles.sheet,
+            keyboardLayout.sheetMaxHeight
+              ? { maxHeight: keyboardLayout.sheetMaxHeight }
+              : null,
+            { backgroundColor: colors.background, borderColor: colors.border },
+          ]}
+        >
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderCopy}>
               <Text style={[styles.sheetTitle, { color: colors.foreground }]}>分组管理</Text>
@@ -559,7 +661,13 @@ export function AddressGroupAssignmentSheet({
             </Pressable>
           </View>
 
-          <ScrollView contentContainerStyle={styles.sheetBody} keyboardShouldPersistTaps="handled">
+          <ScrollView
+            contentContainerStyle={[
+              styles.sheetBody,
+              keyboardLayout.keyboardInset > 0 ? styles.sheetBodyKeyboard : null,
+            ]}
+            keyboardShouldPersistTaps="handled"
+          >
             <View
               style={[
                 styles.card,
@@ -696,13 +804,27 @@ export function AddressGroupAssignmentSheet({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.42)",
-    justifyContent: "flex-end",
+    backgroundColor: "rgba(15,23,42,0.18)",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 28,
+  },
+  overlayBackdrop: {
+    ...StyleSheet.absoluteFillObject,
   },
   sheet: {
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    maxHeight: "84%",
+    width: "100%",
+    maxWidth: 560,
+    maxHeight: "78%",
+    alignSelf: "center",
+    borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
+    shadowColor: "#000000",
+    shadowOpacity: 0.16,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 14 },
+    elevation: 10,
   },
   sheetHeader: {
     flexDirection: "row",
@@ -730,8 +852,11 @@ const styles = StyleSheet.create({
   },
   sheetBody: {
     paddingHorizontal: 18,
-    paddingBottom: 28,
+    paddingBottom: 44,
     gap: 12,
+  },
+  sheetBodyKeyboard: {
+    paddingBottom: 64,
   },
   card: {
     borderRadius: 18,

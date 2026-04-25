@@ -3,6 +3,8 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -19,6 +21,7 @@ import { SwipeableScreen, SwipeSuspendView } from "@/components/swipeable-screen
 import { MiniToast } from "@/components/mini-toast";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
+import { useMail } from "@/lib/mail-context";
 import {
   adminClearInbox,
   adminClearSentItems,
@@ -32,6 +35,13 @@ import {
 } from "@/lib/api";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { setAdminMailEntry } from "@/lib/admin-mail-store";
+import {
+  buildAdminMailReadKey,
+  loadAdminMailUnreadKeySet,
+  markAdminMailRead,
+  reconcileAdminMailReadState,
+  subscribeAdminMailReadState,
+} from "@/lib/admin-mail-read-state";
 import { mergeMailLists } from "@/lib/mail-list-utils";
 import {
   formatMailDate,
@@ -248,12 +258,19 @@ function AddressMailList({
   onClear: () => Promise<void>;
 }) {
   const router = useRouter();
+  const { state: mailState } = useMail();
   const [data, setData] = useState<ParsedMail[]>([]);
   const [count, setCount] = useState(0);
   const [offset, setOffset] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
+  const [unreadMailKeys, setUnreadMailKeys] = useState<Set<string>>(new Set());
   const dataRef = useRef<ParsedMail[]>([]);
   const offsetRef = useRef(0);
+  const readStateScope = mailState.workerUrl;
+  const readStateViewKey = useMemo(
+    () => `admin-address:${address.trim().toLowerCase()}:inbox`,
+    [address]
+  );
 
   useEffect(() => {
     dataRef.current = data;
@@ -262,6 +279,32 @@ function AddressMailList({
   useEffect(() => {
     offsetRef.current = offset;
   }, [offset]);
+
+  useEffect(() => {
+    if (kind !== "inbox" || !readStateScope.trim()) {
+      setUnreadMailKeys(new Set());
+      return;
+    }
+
+    let isMounted = true;
+    const refresh = async () => {
+      const nextUnreadKeys = await loadAdminMailUnreadKeySet(readStateScope);
+      if (isMounted) {
+        setUnreadMailKeys(nextUnreadKeys);
+      }
+    };
+
+    void refresh();
+    const unsubscribe = subscribeAdminMailReadState((event) => {
+      if (event.workerUrl !== readStateScope) return;
+      setUnreadMailKeys(new Set(event.unreadKeys));
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [kind, readStateScope]);
 
   const load = useCallback(
     async (freshOffset: number = 0) => {
@@ -305,6 +348,16 @@ function AddressMailList({
               ? parsed
               : mergeMailLists(dataRef.current, parsed);
 
+        if (kind === "inbox" && readStateScope.trim()) {
+          const nextUnreadKeys = await reconcileAdminMailReadState({
+            workerUrl: readStateScope,
+            viewKey: readStateViewKey,
+            mails: nextData,
+            allowMarkUnread: freshOffset === 0,
+          });
+          setUnreadMailKeys(nextUnreadKeys);
+        }
+
         setData(nextData);
         setCount(page.count);
         setOffset(
@@ -318,7 +371,7 @@ function AddressMailList({
         setIsLoading(false);
       }
     },
-    [address, kind]
+    [address, kind, readStateScope, readStateViewKey]
   );
 
   useEffect(() => {
@@ -328,9 +381,25 @@ function AddressMailList({
     load(0);
   }, [address, kind, load]);
 
+  const markMailReadLocally = useCallback(
+    (mail: ParsedMail) => {
+      if (kind !== "inbox" || !readStateScope.trim()) return;
+      const readKey = buildAdminMailReadKey(mail);
+      setUnreadMailKeys((prev) => {
+        if (!prev.has(readKey)) return prev;
+        const next = new Set(prev);
+        next.delete(readKey);
+        return next;
+      });
+      void markAdminMailRead(readStateScope, mail);
+    },
+    [kind, readStateScope]
+  );
+
   const handleOpenMail = useCallback(
     (mail: ParsedMail) => {
       const entryKind = kind === "inbox" ? "inbox" : "sendbox";
+      markMailReadLocally(mail);
       const cacheKey = `${entryKind}-${mail.id}-${address}`;
       setAdminMailEntry(cacheKey, { mail, kind: entryKind });
       router.push({
@@ -338,7 +407,7 @@ function AddressMailList({
         params: { cacheKey },
       });
     },
-    [address, kind, router]
+    [address, kind, markMailReadLocally, router]
   );
 
   const handleDelete = useCallback(
@@ -355,6 +424,7 @@ function AddressMailList({
               } else {
                 await adminDeleteSentMail(mail.id);
               }
+              markMailReadLocally(mail);
               setData((prev) => prev.filter((item) => item.id !== mail.id));
               setCount((prev) => Math.max(0, prev - 1));
             } catch (err: any) {
@@ -364,7 +434,7 @@ function AddressMailList({
         },
       ]);
     },
-    [kind]
+    [kind, markMailReadLocally]
   );
 
   const handleClear = useCallback(() => {
@@ -391,6 +461,19 @@ function AddressMailList({
       ]
     );
   }, [address, kind, onClear]);
+
+  const handleCopyCode = useCallback(
+    async (mail: ParsedMail, code: string) => {
+      const ok = await copyTextToClipboard(code);
+      if (ok) {
+        markMailReadLocally(mail);
+        onMiniToast("验证码已复制");
+      } else {
+        Alert.alert("复制失败", code);
+      }
+    },
+    [markMailReadLocally, onMiniToast]
+  );
 
   return (
     <FlatList
@@ -450,6 +533,8 @@ function AddressMailList({
       renderItem={({ item }) => {
         const preview = getMailPreview(item, 100) || "(无内容)";
         const code = getVerificationCode(item);
+        const isUnread =
+          kind === "inbox" && unreadMailKeys.has(buildAdminMailReadKey(item));
         const primaryLine =
           kind === "inbox"
             ? getSenderDisplay(item)
@@ -473,12 +558,22 @@ function AddressMailList({
           >
             <View style={styles.mailCardHeader}>
               <View style={styles.mailCardTitleWrap}>
-                <Text
-                  numberOfLines={1}
-                  style={[styles.mailCardSubject, { color: colors.foreground }]}
-                >
-                  {item.subject || "(无主题)"}
-                </Text>
+                <View style={styles.mailCardSubjectRow}>
+                  {isUnread ? (
+                    <View
+                      style={[
+                        styles.adminUnreadDot,
+                        { backgroundColor: colors.primary },
+                      ]}
+                    />
+                  ) : null}
+                  <Text
+                    numberOfLines={1}
+                    style={[styles.mailCardSubject, { color: colors.foreground }]}
+                  >
+                    {item.subject || "(无主题)"}
+                  </Text>
+                </View>
                 <Text
                   numberOfLines={1}
                   style={[styles.mailCardPrimary, { color: colors.muted }]}
@@ -493,13 +588,9 @@ function AddressMailList({
 
             {code ? (
                 <Pressable
-                  onPress={async () => {
-                    const ok = await copyTextToClipboard(code);
-                    if (ok) {
-                      onMiniToast("已复制");
-                    } else {
-                      Alert.alert("复制失败", code);
-                    }
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    void handleCopyCode(item, code);
                   }}
                 style={({ pressed }) => [
                   styles.codeChip,
@@ -533,6 +624,7 @@ function AddressSendPanel({
   address: string;
   colors: ReturnType<typeof useColors>;
 }) {
+  const scrollRef = useRef<ScrollView>(null);
   const defaultLabel = useMemo(() => address.trim(), [address]);
   const [fromMail, setFromMail] = useState(address);
   const [fromName, setFromName] = useState(defaultLabel);
@@ -577,78 +669,93 @@ function AddressSendPanel({
     }
   }, [content, fromMail, fromName, isHtml, subject, toMail, toName]);
 
+  const scrollToBodyInput = useCallback(() => {
+    setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    }, 120);
+  }, []);
+
   return (
-    <ScrollView
-      style={{ flex: 1 }}
-      contentContainerStyle={styles.sendPanelContent}
-      keyboardShouldPersistTaps="handled"
+    <KeyboardAvoidingView
+      style={styles.flex}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 88 : 0}
     >
-      <View
-        style={[
-          styles.formCard,
-          { backgroundColor: colors.surface, borderColor: colors.border },
-        ]}
+      <ScrollView
+        ref={scrollRef}
+        style={styles.flex}
+        contentContainerStyle={styles.sendPanelContent}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
       >
-        <Text style={[styles.formTitle, { color: colors.foreground }]}>地址发信</Text>
-        <Text style={[styles.formHint, { color: colors.muted }]}>
-          已按当前地址预设发件身份，收件人保持空白，方便直接填写目标。
-        </Text>
-
-        <Field label="发件地址" value={fromMail} onChangeText={setFromMail} colors={colors} />
-        <Field label="发件名称" value={fromName} onChangeText={setFromName} colors={colors} />
-        <Field label="收件地址" value={toMail} onChangeText={setToMail} colors={colors} />
-        <Field label="收件名称" value={toName} onChangeText={setToName} colors={colors} />
-        <Field label="主题" value={subject} onChangeText={setSubject} colors={colors} />
-
-        <View style={styles.switchRow}>
-          <Text style={[styles.switchLabel, { color: colors.foreground }]}>HTML 正文</Text>
-          <Switch
-            value={isHtml}
-            onValueChange={setIsHtml}
-            trackColor={{ false: colors.border, true: `${colors.primary}66` }}
-            thumbColor={isHtml ? colors.primary : "#FFFFFF"}
-          />
-        </View>
-
-        <Text style={[styles.fieldLabel, { color: colors.muted }]}>正文</Text>
-        <SwipeSuspendView>
-          <TextInput
-            style={[
-              styles.textarea,
-              {
-                color: colors.foreground,
-                backgroundColor: colors.background,
-                borderColor: colors.border,
-              },
-            ]}
-            value={content}
-            onChangeText={setContent}
-            placeholder={isHtml ? "<p>输入 HTML 正文</p>" : "输入纯文本正文"}
-            placeholderTextColor={colors.muted}
-            multiline
-            textAlignVertical="top"
-          />
-        </SwipeSuspendView>
-
-        <Pressable
-          onPress={handleSend}
-          disabled={isSending}
-          style={({ pressed }) => [
-            styles.primaryButton,
-            {
-              backgroundColor: colors.primary,
-              opacity: pressed || isSending ? 0.8 : 1,
-            },
+        <View
+          style={[
+            styles.formCard,
+            { backgroundColor: colors.surface, borderColor: colors.border },
           ]}
         >
-          {isSending ? (
-            <ActivityIndicator color="#FFFFFF" />
-          ) : (
-            <Text style={styles.primaryButtonText}>立即发送</Text>
-          )}
-        </Pressable>
-      </View>
-    </ScrollView>
+          <Text style={[styles.formTitle, { color: colors.foreground }]}>地址发信</Text>
+          <Text style={[styles.formHint, { color: colors.muted }]}>
+            已按当前地址预设发件身份，收件人保持空白，方便直接填写目标。
+          </Text>
+
+          <Field label="发件地址" value={fromMail} onChangeText={setFromMail} colors={colors} />
+          <Field label="发件名称" value={fromName} onChangeText={setFromName} colors={colors} />
+          <Field label="收件地址" value={toMail} onChangeText={setToMail} colors={colors} />
+          <Field label="收件名称" value={toName} onChangeText={setToName} colors={colors} />
+          <Field label="主题" value={subject} onChangeText={setSubject} colors={colors} />
+
+          <View style={styles.switchRow}>
+            <Text style={[styles.switchLabel, { color: colors.foreground }]}>HTML 正文</Text>
+            <Switch
+              value={isHtml}
+              onValueChange={setIsHtml}
+              trackColor={{ false: colors.border, true: `${colors.primary}66` }}
+              thumbColor={isHtml ? colors.primary : "#FFFFFF"}
+            />
+          </View>
+
+          <Text style={[styles.fieldLabel, { color: colors.muted }]}>正文</Text>
+          <SwipeSuspendView>
+            <TextInput
+              style={[
+                styles.textarea,
+                {
+                  color: colors.foreground,
+                  backgroundColor: colors.background,
+                  borderColor: colors.border,
+                },
+              ]}
+              value={content}
+              onChangeText={setContent}
+              onFocus={scrollToBodyInput}
+              placeholder={isHtml ? "<p>输入 HTML 正文</p>" : "输入纯文本正文"}
+              placeholderTextColor={colors.muted}
+              multiline
+              textAlignVertical="top"
+            />
+          </SwipeSuspendView>
+
+          <Pressable
+            onPress={handleSend}
+            disabled={isSending}
+            style={({ pressed }) => [
+              styles.primaryButton,
+              {
+                backgroundColor: colors.primary,
+                opacity: pressed || isSending ? 0.8 : 1,
+              },
+            ]}
+          >
+            {isSending ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <Text style={styles.primaryButtonText}>立即发送</Text>
+            )}
+          </Pressable>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -686,6 +793,9 @@ function Field({
 }
 
 const styles = StyleSheet.create({
+  flex: {
+    flex: 1,
+  },
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -785,7 +895,20 @@ const styles = StyleSheet.create({
   mailCardTitleWrap: {
     flex: 1,
   },
+  mailCardSubjectRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    minWidth: 0,
+  },
+  adminUnreadDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    flexShrink: 0,
+  },
   mailCardSubject: {
+    flexShrink: 1,
     fontSize: 15,
     fontWeight: "700",
   },
@@ -842,7 +965,7 @@ const styles = StyleSheet.create({
   },
   sendPanelContent: {
     paddingHorizontal: 16,
-    paddingBottom: 28,
+    paddingBottom: 148,
   },
   formCard: {
     borderWidth: 1,

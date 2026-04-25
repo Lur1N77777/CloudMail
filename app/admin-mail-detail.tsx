@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 
@@ -9,8 +9,10 @@ import { ScreenContainer } from "@/components/screen-container";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { adminDeleteMail, adminDeleteSentMail } from "@/lib/api";
 import { getAdminMailEntry, removeAdminMailEntry } from "@/lib/admin-mail-store";
+import { markAdminMailRead } from "@/lib/admin-mail-read-state";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { downloadMailBody, openMailFile, shareMailBody } from "@/lib/mail-download";
+import { useMail } from "@/lib/mail-context";
 import { useColors } from "@/hooks/use-colors";
 import {
   formatMailboxDisplay,
@@ -55,6 +57,7 @@ function formatShanghaiDateTime(dateStr?: string) {
 export default function AdminMailDetailScreen() {
   const colors = useColors();
   const router = useRouter();
+  const { state: mailState } = useMail();
   const [miniToastMessage, setMiniToastMessage] = useState<string | null>(null);
   const { cacheKey } = useLocalSearchParams<{ cacheKey?: string }>();
 
@@ -84,6 +87,11 @@ export default function AdminMailDetailScreen() {
     .filter(Boolean) as string[];
   const toCopyValue = toAddressValues.join(", ") || mail?.ownerAddress?.trim() || "";
   const shanghaiTime = formatShanghaiDateTime(mail?.date || mail?.createdAt);
+
+  useEffect(() => {
+    if (!mail || kind === "sendbox" || !mailState.workerUrl.trim()) return;
+    void markAdminMailRead(mailState.workerUrl, mail);
+  }, [kind, mail, mailState.workerUrl]);
 
   if (!mail || !cacheKey) {
     return (
@@ -160,7 +168,10 @@ export default function AdminMailDetailScreen() {
     if (!code) return;
     const ok = await copyTextToClipboard(code);
     if (ok) {
-      setMiniToastMessage("已复制");
+      if (mailState.workerUrl.trim()) {
+        void markAdminMailRead(mailState.workerUrl, mail);
+      }
+      setMiniToastMessage("验证码已复制");
     } else {
       Alert.alert("复制失败", code);
     }

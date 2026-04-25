@@ -22,7 +22,6 @@ import Animated, {
   useAnimatedStyle,
   useSharedValue,
   withSpring,
-  withTiming,
 } from "react-native-reanimated";
 
 type SwipeDirection = "left" | "right";
@@ -44,10 +43,10 @@ type SwipeSuspendViewProps = ViewProps & {
   resumeDelayMs?: number;
 };
 
-const SWIPE_ACTIVATION_DISTANCE = 18;
-const SWIPE_TRIGGER_DISTANCE = 76;
-const SWIPE_TRIGGER_VELOCITY = 720;
-const SWIPE_PREVIEW_LIMIT = 34;
+const SWIPE_ACTIVATION_DISTANCE = 20;
+const SWIPE_TRIGGER_DISTANCE = 92;
+const SWIPE_TRIGGER_VELOCITY = 860;
+const SWIPE_PREVIEW_LIMIT = 28;
 const SWIPE_EDGE_WIDTH = 24;
 const SWIPE_VERTICAL_FAIL_DISTANCE = 18;
 const SWIPE_HORIZONTAL_DOMINANCE = 1.35;
@@ -281,10 +280,6 @@ export function SwipeableScreen({
               event.velocityX >= SWIPE_TRIGGER_VELOCITY);
 
           if (swipedLeft || swipedRight) {
-            translateX.value = withTiming(
-              swipedLeft ? -SWIPE_PREVIEW_LIMIT : SWIPE_PREVIEW_LIMIT,
-              { duration: 80 }
-            );
             runOnJS(handleSwipe)(swipedLeft ? "left" : "right");
           }
 

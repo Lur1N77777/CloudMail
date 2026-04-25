@@ -30,6 +30,7 @@ import Animated, {
   useAnimatedStyle,
   useDerivedValue,
   useSharedValue,
+  withSpring,
   withTiming,
 } from "react-native-reanimated";
 import { Stack, useRouter } from "expo-router";
@@ -84,6 +85,13 @@ import {
 } from "@/lib/api";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { setAdminMailEntry } from "@/lib/admin-mail-store";
+import {
+  buildAdminMailReadKey,
+  loadAdminMailUnreadKeySet,
+  markAdminMailRead,
+  reconcileAdminMailReadState,
+  subscribeAdminMailReadState,
+} from "@/lib/admin-mail-read-state";
 import { buildMailboxName, normalizeMailboxPrefix } from "@/lib/mailbox-name";
 import {
   parseMail,
@@ -122,15 +130,25 @@ const ADMIN_SEGMENT_PADDING = 3;
 const ADMIN_PAGER_ACTIVATION_DISTANCE = 10;
 const ADMIN_PAGER_VERTICAL_FAIL_DISTANCE = 14;
 const ADMIN_PAGER_HORIZONTAL_DOMINANCE = 1.25;
-const ADMIN_PAGER_TRIGGER_DISTANCE_RATIO = 0.12;
-const ADMIN_PAGER_TRIGGER_VELOCITY = 520;
-const ADMIN_PAGER_SETTLE_ANIMATION_MS = 120;
-const ADMIN_PAGER_TAP_ANIMATION_MS = 95;
-const ADMIN_PAGER_VELOCITY_PROJECTION_MS = 0.12;
+const ADMIN_PAGER_TRIGGER_DISTANCE_RATIO = 0.22;
+const ADMIN_PAGER_TRIGGER_VELOCITY = 760;
+const ADMIN_PAGER_SETTLE_ANIMATION_MS = 150;
+const ADMIN_PAGER_TAP_ANIMATION_MS = 110;
+const ADMIN_PAGER_VELOCITY_PROJECTION_MS = 0.045;
 
-function clampPagerIndex(value: number) {
+const ADMIN_PAGER_SPRING_CONFIG = {
+  damping: 28,
+  stiffness: 240,
+  mass: 0.85,
+  overshootClamping: true,
+} as const;
+const COMPACT_HIT_SLOP = { top: 6, bottom: 6, left: 6, right: 6 };
+
+function clampPagerIndexAround(value: number, center: number, radius = 1) {
   "worklet";
-  return Math.min(Math.max(value, 0), ADMIN_TABS.length - 1);
+  const min = Math.max(0, center - radius);
+  const max = Math.min(ADMIN_TABS.length - 1, center + radius);
+  return Math.min(Math.max(value, min), max);
 }
 
 function getFirstGestureTouch(event: any) {
@@ -591,7 +609,6 @@ export default function AdminScreen() {
       requestedTabIndexRef.current = nextIndex;
       markTabsMountedAround(nextIndex);
       preparedPagerIndex.value = nextIndex;
-      settledIndex.value = nextIndex;
       visualIndex.value = withTiming(
         nextIndex,
         { duration: ADMIN_PAGER_TAP_ANIMATION_MS },
@@ -719,16 +736,15 @@ export default function AdminScreen() {
             return;
           }
 
-          if (
-            settledIndex.value <= 0 &&
-            deltaX >= ADMIN_PAGER_ACTIVATION_DISTANCE
-          ) {
+          const visualCenterIndex = Math.round(visualIndex.value);
+
+          if (visualCenterIndex <= 0 && deltaX >= ADMIN_PAGER_ACTIVATION_DISTANCE) {
             manager.fail();
             return;
           }
 
           if (
-            settledIndex.value >= ADMIN_TABS.length - 1 &&
+            visualCenterIndex >= ADMIN_TABS.length - 1 &&
             deltaX <= -ADMIN_PAGER_ACTIVATION_DISTANCE
           ) {
             manager.fail();
@@ -749,7 +765,11 @@ export default function AdminScreen() {
           if (pagerWidthValue.value <= 0) return;
           const nextVisualIndex =
             dragStartIndex.value - event.translationX / pagerWidthValue.value;
-          const clampedVisualIndex = clampPagerIndex(nextVisualIndex);
+          const clampedVisualIndex = clampPagerIndexAround(
+            nextVisualIndex,
+            Math.round(dragStartIndex.value),
+            1
+          );
           const nearestIndex = Math.round(clampedVisualIndex);
           visualIndex.value = clampedVisualIndex;
           if (nearestIndex !== preparedPagerIndex.value) {
@@ -759,27 +779,40 @@ export default function AdminScreen() {
         })
         .onEnd((event) => {
           if (pagerWidthValue.value <= 0) return;
+          const startIndex = Math.round(dragStartIndex.value);
           const distanceThreshold =
             pagerWidthValue.value * ADMIN_PAGER_TRIGGER_DISTANCE_RATIO;
-          const travelledPages = Math.abs(visualIndex.value - dragStartIndex.value);
+          const travelledPages = Math.abs(visualIndex.value - startIndex);
+          const projectedDeltaPages =
+            (event.translationX + event.velocityX * ADMIN_PAGER_VELOCITY_PROJECTION_MS) /
+            pagerWidthValue.value;
+          const projectedTravelledPages = Math.abs(projectedDeltaPages);
+          const distanceDirection =
+            event.translationX < 0 ? 1 : event.translationX > 0 ? -1 : 0;
+          const velocityDirection =
+            event.velocityX < 0 ? 1 : event.velocityX > 0 ? -1 : 0;
           const hasDecisiveSwipe =
             Math.abs(event.translationX) >= distanceThreshold ||
-            Math.abs(event.velocityX) >= ADMIN_PAGER_TRIGGER_VELOCITY ||
-            travelledPages >= ADMIN_PAGER_TRIGGER_DISTANCE_RATIO;
-          const projectedIndex =
-            dragStartIndex.value -
-            (event.translationX + event.velocityX * ADMIN_PAGER_VELOCITY_PROJECTION_MS) /
-              pagerWidthValue.value;
-          let nextIndex = hasDecisiveSwipe
-            ? Math.round(projectedIndex)
-            : Math.round(dragStartIndex.value);
+            (Math.abs(event.velocityX) >= ADMIN_PAGER_TRIGGER_VELOCITY &&
+              travelledPages >= 0.08) ||
+            projectedTravelledPages >= ADMIN_PAGER_TRIGGER_DISTANCE_RATIO;
+          const direction = Math.abs(event.translationX) >= distanceThreshold
+            ? distanceDirection
+            : Math.abs(event.velocityX) >= ADMIN_PAGER_TRIGGER_VELOCITY
+              ? velocityDirection
+              : projectedDeltaPages < 0
+                ? 1
+                : projectedDeltaPages > 0
+                  ? -1
+                  : 0;
+          let nextIndex = hasDecisiveSwipe ? startIndex + direction : startIndex;
 
-          nextIndex = clampPagerIndex(nextIndex);
+          nextIndex = clampPagerIndexAround(nextIndex, startIndex, 1);
           preparedPagerIndex.value = nextIndex;
           runOnJS(markTabsMountedAround)(nextIndex);
-          visualIndex.value = withTiming(
+          visualIndex.value = withSpring(
             nextIndex,
-            { duration: ADMIN_PAGER_SETTLE_ANIMATION_MS },
+            ADMIN_PAGER_SPRING_CONFIG,
             (finished) => {
               if (!finished) return;
               settledIndex.value = nextIndex;
@@ -1967,6 +2000,7 @@ function AddressesPanel({
             contentContainerStyle={styles.groupFilterRow}
           >
             <Pressable
+              hitSlop={COMPACT_HIT_SLOP}
               onPress={() => setGroupFilter("all")}
               style={({ pressed }) => [
                 styles.groupFilterChip,
@@ -1989,6 +2023,7 @@ function AddressesPanel({
               </Text>
             </Pressable>
             <Pressable
+              hitSlop={COMPACT_HIT_SLOP}
               onPress={() => setGroupFilter("ungrouped")}
               style={({ pressed }) => [
                 styles.groupFilterChip,
@@ -2016,6 +2051,7 @@ function AddressesPanel({
             {addressGroups.map((group) => (
               <Pressable
                 key={group.id}
+                hitSlop={COMPACT_HIT_SLOP}
                 onPress={() => setGroupFilter(group.id)}
                 style={({ pressed }) => [
                   styles.groupFilterChip,
@@ -2045,24 +2081,26 @@ function AddressesPanel({
         </SwipeSuspendView>
         <View style={styles.addressToolbarFooter}>
           <View style={styles.addressToolbarCopy}>
-            <Text style={[styles.panelEyebrow, { color: colors.primary }]}>
-              地址列表
-            </Text>
-            <View style={styles.inlineStatusRow}>
-              <Text style={[styles.addressToolbarMeta, { color: colors.muted }]}>
-                {query.trim()
-                  ? `当前显示 ${filteredData.length} / 总计 ${count}`
-                  : groupFilter === "ungrouped"
-                    ? `未分组 ${filteredData.length} 个`
-                    : groupFilter !== "all"
-                      ? `当前分组 ${filteredData.length} 个`
-                      : `共 ${count} 个地址`}
+            <View style={styles.addressToolbarInlineRow}>
+              <Text numberOfLines={1} style={styles.addressToolbarStatusLine}>
+                <Text style={{ color: colors.primary }}>地址列表</Text>
+                <Text style={{ color: colors.border }}> · </Text>
+                <Text style={{ color: colors.muted }}>
+                  {query.trim()
+                    ? `当前显示 ${filteredData.length} / 总计 ${count}`
+                    : groupFilter === "ungrouped"
+                      ? `未分组 ${filteredData.length} 个`
+                      : groupFilter !== "all"
+                        ? `当前分组 ${filteredData.length} 个`
+                        : `共 ${count} 个地址`}
+                </Text>
               </Text>
               {isSyncing ? <InlineSyncBadge colors={colors} compact /> : null}
             </View>
           </View>
           <View style={styles.addressToolbarActions}>
             <Pressable
+              hitSlop={COMPACT_HIT_SLOP}
               onPress={() => setShowGroupManager(true)}
               style={({ pressed }) => [
                 styles.ghostActionButton,
@@ -2078,6 +2116,7 @@ function AddressesPanel({
               </Text>
             </Pressable>
             <Pressable
+              hitSlop={COMPACT_HIT_SLOP}
               onPress={() => setShowBindModal(true)}
               style={({ pressed }) => [
                 styles.ghostActionButton,
@@ -2093,6 +2132,7 @@ function AddressesPanel({
               </Text>
             </Pressable>
             <Pressable
+              hitSlop={COMPACT_HIT_SLOP}
               onPress={() => {
                 loadSettings();
                 setShowCreateModal(true);
@@ -2106,6 +2146,7 @@ function AddressesPanel({
             </Pressable>
             {query.trim() ? (
               <Pressable
+                hitSlop={COMPACT_HIT_SLOP}
                 onPress={handleResetSearch}
                 style={({ pressed }) => [
                   styles.ghostActionButton,
@@ -2122,6 +2163,7 @@ function AddressesPanel({
               </Pressable>
             ) : null}
             <Pressable
+              hitSlop={COMPACT_HIT_SLOP}
               onPress={handleSearch}
               style={({ pressed }) => [
                 styles.primaryActionButton,
@@ -2755,6 +2797,7 @@ function MailsPanel({
   const [mailGroupLookup, setMailGroupLookup] = useState<Map<string, AddressGroup[]>>(new Map());
   const [creatingAddress, setCreatingAddress] = useState<string | null>(null);
   const [createdUnknownAddresses, setCreatedUnknownAddresses] = useState<Record<string, true>>({});
+  const [unreadMailKeys, setUnreadMailKeys] = useState<Set<string>>(new Set());
   const [address, setAddress] = useState("");
   const deferredAddress = useDeferredValue(address);
   const dataRef = useRef<ParsedMail[]>([]);
@@ -2769,8 +2812,10 @@ function MailsPanel({
   const mailPanelRootRef = useRef<React.ElementRef<typeof View>>(null);
   const mailFilterTriggerRef = useRef<React.ElementRef<typeof View>>(null);
   const groupScope = mailState.workerUrl;
+  const readStateScope = mailState.workerUrl;
   const supportsMailGroupFilter = kind === "inbox";
   const shouldLoadMailGroups = supportsMailGroupFilter;
+  const readStateViewKey = useMemo(() => `admin:${kind}`, [kind]);
   const highlightStyle = useMemo(
     () => ({
       backgroundColor: `${colors.primary}26`,
@@ -2822,6 +2867,32 @@ function MailsPanel({
   useEffect(() => {
     offsetRef.current = offset;
   }, [offset]);
+
+  useEffect(() => {
+    if (kind === "sendbox" || !readStateScope.trim()) {
+      setUnreadMailKeys(new Set());
+      return;
+    }
+
+    let isMounted = true;
+    const refresh = async () => {
+      const nextUnreadKeys = await loadAdminMailUnreadKeySet(readStateScope);
+      if (isMounted) {
+        setUnreadMailKeys(nextUnreadKeys);
+      }
+    };
+
+    void refresh();
+    const unsubscribe = subscribeAdminMailReadState((event) => {
+      if (event.workerUrl !== readStateScope) return;
+      setUnreadMailKeys(new Set(event.unreadKeys));
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [kind, readStateScope]);
 
   const loadMailGroupsState = useCallback(async () => {
     const next = await getAddressGroupsLookup(groupScope);
@@ -2954,6 +3025,17 @@ function MailsPanel({
               : page.results.length
             : freshOffset + page.results.length;
 
+        if (kind !== "sendbox" && readStateScope.trim()) {
+          const nextUnreadKeys = await reconcileAdminMailReadState({
+            workerUrl: readStateScope,
+            viewKey: readStateViewKey,
+            mails: nextData,
+            allowMarkUnread: freshOffset === 0,
+          });
+          if (requestId !== requestIdRef.current) return;
+          setUnreadMailKeys(nextUnreadKeys);
+        }
+
         commitPanelState(nextData, page.count, nextOffset, queryToken, {
           defer: background || silent,
         });
@@ -2970,7 +3052,7 @@ function MailsPanel({
         }
       }
     },
-    [address, commitPanelState, kind]
+    [address, commitPanelState, kind, readStateScope, readStateViewKey]
   );
 
   const loadSearchDataset = useCallback(
@@ -3029,6 +3111,17 @@ function MailsPanel({
         }
 
         const mergedData = sortMailsDesc(Array.from(mergedMap.values()));
+        if (kind !== "sendbox" && readStateScope.trim()) {
+          const nextUnreadKeys = await reconcileAdminMailReadState({
+            workerUrl: readStateScope,
+            viewKey: readStateViewKey,
+            mails: mergedData,
+            allowMarkUnread: true,
+          });
+          if (requestId !== requestIdRef.current) return;
+          setUnreadMailKeys(nextUnreadKeys);
+        }
+
         adminMailSearchDatasetCache.set(kind, {
           count: totalCount,
           data: mergedData,
@@ -3050,7 +3143,7 @@ function MailsPanel({
         }
       }
     },
-    [commitPanelState, kind]
+    [commitPanelState, kind, readStateScope, readStateViewKey]
   );
 
   useEffect(() => {
@@ -3191,8 +3284,24 @@ function MailsPanel({
     void load(0, "");
   }, [closeMailFilterMenu, load]);
 
+  const markMailReadLocally = useCallback(
+    (mail: ParsedMail) => {
+      if (kind === "sendbox" || !readStateScope.trim()) return;
+      const readKey = buildAdminMailReadKey(mail);
+      setUnreadMailKeys((prev) => {
+        if (!prev.has(readKey)) return prev;
+        const next = new Set(prev);
+        next.delete(readKey);
+        return next;
+      });
+      void markAdminMailRead(readStateScope, mail);
+    },
+    [kind, readStateScope]
+  );
+
   const handleOpenMail = useCallback(
     (mail: ParsedMail) => {
+      markMailReadLocally(mail);
       const cacheKey = `${kind}-${mail.id}-${mail.ownerAddress || "global"}`;
       setAdminMailEntry(cacheKey, { mail, kind });
       router.push({
@@ -3200,17 +3309,18 @@ function MailsPanel({
         params: { cacheKey },
       });
     },
-    [kind, router]
+    [kind, markMailReadLocally, router]
   );
 
-  const handleCopyCode = useCallback(async (code: string) => {
+  const handleCopyCode = useCallback(async (mail: ParsedMail, code: string) => {
     const ok = await copyTextToClipboard(code);
     if (ok) {
-      onMiniToast("已复制");
+      markMailReadLocally(mail);
+      onMiniToast("验证码已复制");
     } else {
       Alert.alert("复制失败", code);
     }
-  }, [onMiniToast]);
+  }, [markMailReadLocally, onMiniToast]);
 
   const handleDelete = useCallback((mail: ParsedMail) => {
     Alert.alert("删除邮件", mail.subject || "(无主题)", [
@@ -3225,6 +3335,7 @@ function MailsPanel({
             } else {
               await adminDeleteMail(mail.id);
             }
+            markMailReadLocally(mail);
             clearKindCaches();
             const nextData = dataRef.current.filter((m) => m.id !== mail.id);
             commitPanelState(
@@ -3239,7 +3350,7 @@ function MailsPanel({
         },
       },
     ]);
-  }, [clearKindCaches, commitPanelState, kind]);
+  }, [clearKindCaches, commitPanelState, kind, markMailReadLocally]);
 
   const markUnknownAddressCreated = useCallback((targetAddress: string) => {
     const normalized = normalizeGroupAddress(targetAddress);
@@ -3296,22 +3407,28 @@ function MailsPanel({
   );
 
   const renderMailItem = useCallback(
-    ({ item }: { item: ParsedMail }) => (
-      <MailListItem
-        item={item}
-        kind={kind}
-        colors={colors}
-        searchQuery={deferredAddress}
-        metaQuery={address}
-        highlightStyle={highlightStyle}
-        createdUnknownAddresses={createdUnknownAddresses}
-        creatingAddress={creatingAddress}
-        onOpen={handleOpenMail}
-        onDelete={handleDelete}
-        onCopyCode={handleCopyCode}
-        onCreateAddressFromUnknown={handleCreateAddressFromUnknown}
-      />
-    ),
+    ({ item }: { item: ParsedMail }) => {
+      const isUnread =
+        kind !== "sendbox" && unreadMailKeys.has(buildAdminMailReadKey(item));
+
+      return (
+        <MailListItem
+          item={item}
+          kind={kind}
+          colors={colors}
+          searchQuery={deferredAddress}
+          metaQuery={address}
+          highlightStyle={highlightStyle}
+          createdUnknownAddresses={createdUnknownAddresses}
+          creatingAddress={creatingAddress}
+          isUnread={isUnread}
+          onOpen={handleOpenMail}
+          onDelete={handleDelete}
+          onCopyCode={handleCopyCode}
+          onCreateAddressFromUnknown={handleCreateAddressFromUnknown}
+        />
+      );
+    },
     [
       address,
       colors,
@@ -3324,6 +3441,7 @@ function MailsPanel({
       handleOpenMail,
       highlightStyle,
       kind,
+      unreadMailKeys,
     ]
   );
 
@@ -3398,6 +3516,7 @@ function MailsPanel({
           {supportsMailGroupFilter ? (
             <View ref={mailFilterTriggerRef} collapsable={false}>
               <Pressable
+                hitSlop={COMPACT_HIT_SLOP}
                 onPress={toggleMailFilterMenu}
                 style={({ pressed }) => [
                   styles.mailQuickFilterButton,
@@ -3426,6 +3545,7 @@ function MailsPanel({
           ) : null}
 
           <Pressable
+            hitSlop={COMPACT_HIT_SLOP}
             onPress={handleRunSearch}
             style={({ pressed }) => [
               styles.mailSearchIconButton,
@@ -3710,6 +3830,7 @@ const MailListItem = React.memo(function MailListItem({
   highlightStyle,
   createdUnknownAddresses,
   creatingAddress,
+  isUnread,
   onOpen,
   onDelete,
   onCopyCode,
@@ -3723,9 +3844,10 @@ const MailListItem = React.memo(function MailListItem({
   highlightStyle: StyleProp<TextStyle>;
   createdUnknownAddresses: Record<string, true>;
   creatingAddress: string | null;
+  isUnread: boolean;
   onOpen: (mail: ParsedMail) => void;
   onDelete: (mail: ParsedMail) => void;
-  onCopyCode: (code: string) => void;
+  onCopyCode: (mail: ParsedMail, code: string) => void;
   onCreateAddressFromUnknown: (mail: ParsedMail) => void;
 }) {
   const preview = useMemo(() => getMailPreview(item, 68) || "(无内容)", [item]);
@@ -3775,13 +3897,27 @@ const MailListItem = React.memo(function MailListItem({
     >
       <View style={styles.compactMailTop}>
         <View style={styles.compactMailTitleWrap}>
-          <HighlightText
-            text={item.subject || "(无主题)"}
-            query={searchQuery}
-            style={[styles.compactMailSubject, { color: colors.foreground }]}
-            highlightStyle={highlightStyle}
-            numberOfLines={1}
-          />
+          <View style={styles.compactMailSubjectRow}>
+            {isUnread ? (
+              <View
+                style={[
+                  styles.adminUnreadDot,
+                  { backgroundColor: colors.primary },
+                ]}
+              />
+            ) : null}
+            <HighlightText
+              text={item.subject || "(无主题)"}
+              query={searchQuery}
+              style={[
+                styles.compactMailSubject,
+                isUnread && styles.compactMailSubjectUnread,
+                { color: colors.foreground },
+              ]}
+              highlightStyle={highlightStyle}
+              numberOfLines={1}
+            />
+          </View>
           <HighlightText
             text={`${primaryAddress}${
               primaryLabel && primaryLabel !== primaryAddress ? ` · ${primaryLabel}` : ""
@@ -3819,7 +3955,10 @@ const MailListItem = React.memo(function MailListItem({
           </Text>
           {code ? (
             <Pressable
-              onPress={() => onCopyCode(code)}
+              onPress={(event) => {
+                event.stopPropagation();
+                onCopyCode(item, code);
+              }}
               style={({ pressed }) => [
                 styles.compactCodePill,
                 {
@@ -4770,25 +4909,26 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   addressToolbar: {
-    paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     borderBottomWidth: 0.5,
-    gap: 12,
+    gap: 8,
   },
   mailToolbarTopRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
     zIndex: 20,
   },
   searchFieldCard: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 7,
     borderWidth: 1,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    minHeight: 36,
   },
   mailSearchCard: {
     flex: 1,
@@ -4801,8 +4941,8 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
   },
   mailSearchFieldInput: {
-    height: 20,
-    lineHeight: 20,
+    height: 18,
+    lineHeight: 18,
   },
   searchFieldClearButton: {
     marginLeft: 2,
@@ -4823,15 +4963,15 @@ const styles = StyleSheet.create({
   groupFilterRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
     paddingRight: 4,
   },
   groupFilterChip: {
     borderWidth: 1,
     borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    minHeight: 34,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    minHeight: 32,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -4841,9 +4981,11 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   addressToolbarFooter: {
-    flexDirection: "column",
-    alignItems: "stretch",
-    gap: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 8,
   },
   mailToolbarFooter: {
     flexDirection: "row",
@@ -4853,11 +4995,12 @@ const styles = StyleSheet.create({
   },
   addressToolbarCopy: {
     minWidth: 0,
+    flexShrink: 1,
   },
   mailToolbarSummary: {
     width: "100%",
     minWidth: 0,
-    minHeight: 22,
+    minHeight: 18,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -4870,21 +5013,30 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignSelf: "center",
     gap: 5,
-    paddingTop: 2,
-    minHeight: 20,
+    minHeight: 18,
     flexWrap: "nowrap",
   },
-  addressToolbarMeta: {
-    fontSize: 13,
-    marginTop: 4,
-    lineHeight: 18,
+  addressToolbarInlineRow: {
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    minHeight: 18,
+    flexWrap: "nowrap",
+  },
+  addressToolbarStatusLine: {
+    minWidth: 0,
+    flexShrink: 1,
+    fontSize: 12,
+    fontWeight: "700",
+    lineHeight: 17,
   },
   mailToolbarStatusLine: {
     minWidth: 0,
     flexShrink: 1,
     fontSize: 12,
     fontWeight: "700",
-    lineHeight: 18,
+    lineHeight: 17,
     textAlign: "center",
   },
   mailInlineSyncDot: {
@@ -4895,8 +5047,8 @@ const styles = StyleSheet.create({
   mailQuickFilterButton: {
     borderWidth: 1,
     borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     maxWidth: 96,
     minWidth: 64,
     minHeight: 34,
@@ -4922,7 +5074,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     flexWrap: "wrap",
-    gap: 8,
+    gap: 6,
+    flexShrink: 0,
   },
   mailToolbarActions: {
     flexDirection: "row",
@@ -4949,8 +5102,11 @@ const styles = StyleSheet.create({
   ghostActionButton: {
     borderWidth: 1,
     borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    minHeight: 34,
+    alignItems: "center",
+    justifyContent: "center",
   },
   ghostActionText: {
     fontSize: 13,
@@ -4958,8 +5114,11 @@ const styles = StyleSheet.create({
   },
   primaryActionButton: {
     borderRadius: 999,
-    paddingHorizontal: 16,
-    paddingVertical: 9,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    minHeight: 34,
+    alignItems: "center",
+    justifyContent: "center",
   },
   toolbarActionCompact: {
     paddingHorizontal: 12,
@@ -5255,6 +5414,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
     lineHeight: 18,
+    flexShrink: 1,
+  },
+  compactMailSubjectRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    minWidth: 0,
+  },
+  compactMailSubjectUnread: {
+    flexShrink: 1,
+  },
+  adminUnreadDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    flexShrink: 0,
   },
   compactMailSender: {
     fontSize: 12,
