@@ -1,5 +1,5 @@
 {
-  "name": "cloudmail-admin",
+  "name": "cloudmail",
   "version": "1.0.10",
   "private": true,
   "main": "expo-router/entry",
