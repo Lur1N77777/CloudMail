@@ -312,6 +312,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: "SET_SUCCESS", payload: "配置已保存" });
       } catch {
         dispatch({ type: "SET_ERROR", payload: "保存配置失败" });
+        throw new Error("保存配置失败");
       }
     },
     []
@@ -849,19 +850,23 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       throw new Error("请输入管理员密码");
     }
     try {
-      await apiAdminLogin(password);
+      const trimmedPassword = password.trim();
+      await apiAdminLogin(trimmedPassword);
+      const latestConfig = await getConfig();
       dispatch({
         type: "SET_CONFIG",
         payload: {
-          workerUrl: state.workerUrl,
-          adminPassword: password,
-          sitePassword: state.sitePassword,
-          refreshInterval: state.refreshInterval,
+          workerUrl: latestConfig.workerUrl || state.workerUrl,
+          adminPassword: trimmedPassword,
+          sitePassword: latestConfig.sitePassword,
+          refreshInterval: Number.isFinite(latestConfig.refreshInterval)
+            ? latestConfig.refreshInterval
+            : state.refreshInterval,
         },
       });
       dispatch({ type: "SET_ADMIN_MODE", payload: true });
       dispatch({ type: "SET_SUCCESS", payload: "已进入管理员模式" });
-      void saveConfig({ adminPassword: password }).catch(() => {});
+      void saveConfig({ adminPassword: trimmedPassword }).catch(() => {});
     } catch (err: any) {
       dispatch({
         type: "SET_ERROR",

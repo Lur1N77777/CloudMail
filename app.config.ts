@@ -41,7 +41,7 @@ const env = {
 const config: ExpoConfig = {
   name: env.appName,
   slug: env.appSlug,
-  version: "1.0.10",
+  version: "1.0.11",
   extra: {
     eas: {
       projectId: "02aa1a6e-d427-460a-878f-0145614afd2a",
@@ -55,13 +55,13 @@ const config: ExpoConfig = {
   ios: {
     supportsTablet: true,
     bundleIdentifier: env.iosBundleId,
-    buildNumber: "11",
+    buildNumber: "12",
     "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
   },
   android: {
-    versionCode: 11,
+    versionCode: 12,
     adaptiveIcon: {
       backgroundColor: "#F8F1E8",
       foregroundImage: "./assets/images/android-icon-foreground.png",

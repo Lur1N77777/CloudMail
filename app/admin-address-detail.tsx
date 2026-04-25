@@ -12,9 +12,10 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 
 import { ScreenContainer } from "@/components/screen-container";
+import { SwipeableScreen, SwipeSuspendView } from "@/components/swipeable-screen";
 import { MiniToast } from "@/components/mini-toast";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
@@ -45,6 +46,11 @@ import {
 type AddressDetailTab = "inbox" | "sent" | "send";
 
 const PAGE_SIZE = 30;
+const ADDRESS_DETAIL_TABS: { key: AddressDetailTab; label: string }[] = [
+  { key: "inbox", label: "收件箱" },
+  { key: "sent", label: "发件箱" },
+  { key: "send", label: "发邮件" },
+];
 
 export default function AdminAddressDetailScreen() {
   const colors = useColors();
@@ -54,6 +60,20 @@ export default function AdminAddressDetailScreen() {
   const addressId = typeof params.addressId === "string" ? params.addressId : "";
   const [tab, setTab] = useState<AddressDetailTab>("inbox");
   const [miniToastMessage, setMiniToastMessage] = useState<string | null>(null);
+  const activeTabIndex = useMemo(
+    () => ADDRESS_DETAIL_TABS.findIndex((item) => item.key === tab),
+    [tab]
+  );
+
+  const selectAdjacentTab = useCallback(
+    (direction: -1 | 1) => {
+      const nextTab = ADDRESS_DETAIL_TABS[activeTabIndex + direction]?.key;
+      if (nextTab) {
+        setTab(nextTab);
+      }
+    },
+    [activeTabIndex]
+  );
 
   if (!addressName) {
     return (
@@ -76,6 +96,12 @@ export default function AdminAddressDetailScreen() {
 
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]}>
+      <Stack.Screen
+        options={{
+          fullScreenGestureEnabled: activeTabIndex === 0,
+          gestureEnabled: activeTabIndex === 0,
+        }}
+      />
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
         <Pressable
           onPress={() => router.back()}
@@ -142,13 +168,7 @@ export default function AdminAddressDetailScreen() {
             { backgroundColor: colors.surface, borderColor: colors.border },
           ]}
         >
-          {(
-            [
-              ["inbox", "收件箱"],
-              ["sent", "发件箱"],
-              ["send", "发邮件"],
-            ] as [AddressDetailTab, string][]
-          ).map(([key, label]) => (
+          {ADDRESS_DETAIL_TABS.map(({ key, label }) => (
             <Pressable
               key={key}
               onPress={() => setTab(key)}
@@ -170,31 +190,42 @@ export default function AdminAddressDetailScreen() {
         </View>
       </View>
 
-      <View style={{ flex: 1 }}>
-        {tab === "inbox" ? (
-          <AddressMailList
-            address={addressName}
-            colors={colors}
-            kind="inbox"
-            onMiniToast={(message) => setMiniToastMessage(message)}
-            onClear={async () => {
-              await adminClearInbox(addressName);
-            }}
-          />
-        ) : tab === "sent" ? (
-          <AddressMailList
-            address={addressName}
-            colors={colors}
-            kind="sent"
-            onMiniToast={(message) => setMiniToastMessage(message)}
-            onClear={async () => {
-              await adminClearSentItems(addressName);
-            }}
-          />
-        ) : (
-          <AddressSendPanel address={addressName} colors={colors} />
-        )}
-      </View>
+      <SwipeableScreen
+        onSwipeLeft={
+          activeTabIndex < ADDRESS_DETAIL_TABS.length - 1
+            ? () => selectAdjacentTab(1)
+            : undefined
+        }
+        onSwipeRight={
+          activeTabIndex > 0 ? () => selectAdjacentTab(-1) : undefined
+        }
+      >
+        <View style={{ flex: 1 }}>
+          {tab === "inbox" ? (
+            <AddressMailList
+              address={addressName}
+              colors={colors}
+              kind="inbox"
+              onMiniToast={(message) => setMiniToastMessage(message)}
+              onClear={async () => {
+                await adminClearInbox(addressName);
+              }}
+            />
+          ) : tab === "sent" ? (
+            <AddressMailList
+              address={addressName}
+              colors={colors}
+              kind="sent"
+              onMiniToast={(message) => setMiniToastMessage(message)}
+              onClear={async () => {
+                await adminClearSentItems(addressName);
+              }}
+            />
+          ) : (
+            <AddressSendPanel address={addressName} colors={colors} />
+          )}
+        </View>
+      </SwipeableScreen>
       <MiniToast
         message={miniToastMessage}
         onDismiss={() => setMiniToastMessage(null)}
@@ -580,22 +611,24 @@ function AddressSendPanel({
         </View>
 
         <Text style={[styles.fieldLabel, { color: colors.muted }]}>正文</Text>
-        <TextInput
-          style={[
-            styles.textarea,
-            {
-              color: colors.foreground,
-              backgroundColor: colors.background,
-              borderColor: colors.border,
-            },
-          ]}
-          value={content}
-          onChangeText={setContent}
-          placeholder={isHtml ? "<p>输入 HTML 正文</p>" : "输入纯文本正文"}
-          placeholderTextColor={colors.muted}
-          multiline
-          textAlignVertical="top"
-        />
+        <SwipeSuspendView>
+          <TextInput
+            style={[
+              styles.textarea,
+              {
+                color: colors.foreground,
+                backgroundColor: colors.background,
+                borderColor: colors.border,
+              },
+            ]}
+            value={content}
+            onChangeText={setContent}
+            placeholder={isHtml ? "<p>输入 HTML 正文</p>" : "输入纯文本正文"}
+            placeholderTextColor={colors.muted}
+            multiline
+            textAlignVertical="top"
+          />
+        </SwipeSuspendView>
 
         <Pressable
           onPress={handleSend}
@@ -631,7 +664,7 @@ function Field({
   value: string;
 }) {
   return (
-    <View style={styles.fieldWrap}>
+    <SwipeSuspendView style={styles.fieldWrap}>
       <Text style={[styles.fieldLabel, { color: colors.muted }]}>{label}</Text>
       <TextInput
         style={[
@@ -648,7 +681,7 @@ function Field({
         placeholderTextColor={colors.muted}
         autoCapitalize="none"
       />
-    </View>
+    </SwipeSuspendView>
   );
 }
 

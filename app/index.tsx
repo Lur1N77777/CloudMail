@@ -12,7 +12,7 @@ export default function RootIndexScreen() {
 
   useEffect(() => {
     if (!state.isInitialized) return;
-    router.replace(state.isAdminMode ? "/admin" : "/(tabs)");
+    router.replace(state.isAdminMode ? "/admin" : "/settings");
   }, [router, state.isAdminMode, state.isInitialized]);
 
   return (

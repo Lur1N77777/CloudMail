@@ -26,8 +26,8 @@ module.exports = {
   },
   plugins: [
     plugin(({ addVariant }) => {
-      addVariant("light", ':root:not([data-theme="dark"]) &');
-      addVariant("dark", ':root[data-theme="dark"] &');
+      addVariant("light", ':root:not([data-theme="dark"]):not([data-theme="oled"]) &');
+      addVariant("dark", [':root[data-theme="dark"] &', ':root[data-theme="oled"] &']);
     }),
   ],
 };

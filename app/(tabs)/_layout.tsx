@@ -26,6 +26,7 @@ export default function TabLayout() {
         headerShown: false,
         tabBarButton: HapticTab,
         tabBarStyle: {
+          display: "none",
           paddingTop: 8,
           paddingBottom: bottomPadding,
           height: tabBarHeight,
@@ -38,6 +39,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
+          href: null,
           title: "收件箱",
           tabBarIcon: ({ color }) => (
             <IconSymbol size={26} name="tray.fill" color={color} />
@@ -47,6 +49,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="compose"
         options={{
+          href: null,
           title: "发送",
           tabBarIcon: ({ color }) => (
             <IconSymbol size={26} name="paperplane.fill" color={color} />
@@ -56,6 +59,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="addresses"
         options={{
+          href: null,
           title: "邮箱",
           tabBarIcon: ({ color }) => (
             <IconSymbol size={26} name="at" color={color} />
@@ -65,6 +69,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="settings"
         options={{
+          href: null,
           title: "设置",
           tabBarIcon: ({ color }) => (
             <IconSymbol size={26} name="gearshape.fill" color={color} />

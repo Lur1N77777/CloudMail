@@ -1,4 +1,5 @@
 import React, {
+  startTransition,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -7,7 +8,6 @@ import React, {
   useState,
 } from "react";
 import {
-  Animated,
   Text,
   View,
   FlatList,
@@ -21,12 +21,25 @@ import {
   Pressable,
   RefreshControl,
   InteractionManager,
-  Easing,
+  Keyboard,
 } from "react-native";
 import type { StyleProp, TextStyle } from "react-native";
-import { useRouter } from "expo-router";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import Animated, {
+  runOnJS,
+  useAnimatedStyle,
+  useDerivedValue,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
+import { Stack, useRouter } from "expo-router";
 
 import { ScreenContainer } from "@/components/screen-container";
+import {
+  SwipeableScreenContext,
+  SwipeSuspendView,
+  type SwipeableScreenControls,
+} from "@/components/swipeable-screen";
 import {
   AddressGroupAssignmentSheet,
   AddressGroupChip,
@@ -99,8 +112,63 @@ const ADMIN_TABS: { key: AdminTab; label: string }[] = [
   { key: "unknown", label: "未知" },
   { key: "send", label: "发送" },
 ];
+const ADMIN_INITIAL_TAB: AdminTab = "mails";
+const ADMIN_INITIAL_TAB_INDEX = Math.max(
+  0,
+  ADMIN_TABS.findIndex(({ key }) => key === ADMIN_INITIAL_TAB)
+);
 const ADMIN_SEGMENT_GAP = 4;
 const ADMIN_SEGMENT_PADDING = 3;
+const ADMIN_PAGER_ACTIVATION_DISTANCE = 10;
+const ADMIN_PAGER_VERTICAL_FAIL_DISTANCE = 14;
+const ADMIN_PAGER_HORIZONTAL_DOMINANCE = 1.25;
+const ADMIN_PAGER_TRIGGER_DISTANCE_RATIO = 0.12;
+const ADMIN_PAGER_TRIGGER_VELOCITY = 520;
+const ADMIN_PAGER_SETTLE_ANIMATION_MS = 120;
+const ADMIN_PAGER_TAP_ANIMATION_MS = 95;
+const ADMIN_PAGER_VELOCITY_PROJECTION_MS = 0.12;
+
+function clampPagerIndex(value: number) {
+  "worklet";
+  return Math.min(Math.max(value, 0), ADMIN_TABS.length - 1);
+}
+
+function getFirstGestureTouch(event: any) {
+  "worklet";
+  return event.changedTouches?.[0] ?? event.allTouches?.[0];
+}
+
+function createMountedTabsAround(index: number, radius = 1): Record<AdminTab, boolean> {
+  const mounted = ADMIN_TABS.reduce(
+    (acc, { key }) => {
+      acc[key] = false;
+      return acc;
+    },
+    {} as Record<AdminTab, boolean>
+  );
+
+  for (let offset = -radius; offset <= radius; offset += 1) {
+    const key = ADMIN_TABS[index + offset]?.key;
+    if (key) mounted[key] = true;
+  }
+
+  return mounted;
+}
+
+function includeMountedTabsAround(
+  previous: Record<AdminTab, boolean>,
+  index: number,
+  radius = 1
+) {
+  let next = previous;
+  for (let offset = -radius; offset <= radius; offset += 1) {
+    const key = ADMIN_TABS[index + offset]?.key;
+    if (key && !next[key]) {
+      next = { ...next, [key]: true };
+    }
+  }
+  return next;
+}
 
 function normalizeSearchKeyword(value?: string) {
   return (value || "").trim().toLowerCase();
@@ -404,132 +472,347 @@ export default function AdminScreen() {
   const colors = useColors();
   const router = useRouter();
   const { state, clearError, clearSuccess } = useMail();
-  const { colorScheme, themePreference, setThemePreference } = useThemeContext();
-  const [tab, setTab] = useState<AdminTab>("mails");
-  const [mountedTabs, setMountedTabs] = useState<Record<AdminTab, boolean>>({
-    stats: false,
-    addresses: false,
-    mails: true,
-    sendbox: false,
-    unknown: false,
-    send: false,
-  });
+  const { colorScheme, themePreference, setThemePreference, lastDarkPreference } =
+    useThemeContext();
+  const [tab, setTab] = useState<AdminTab>(ADMIN_INITIAL_TAB);
+  const [mountedTabs, setMountedTabs] = useState<Record<AdminTab, boolean>>(() =>
+    createMountedTabsAround(ADMIN_INITIAL_TAB_INDEX, ADMIN_TABS.length)
+  );
+  const [warmTabs, setWarmTabs] = useState<Record<AdminTab, boolean>>(() =>
+    createMountedTabsAround(ADMIN_INITIAL_TAB_INDEX)
+  );
   const [miniToastMessage, setMiniToastMessage] = useState<string | null>(null);
   const [segmentTrackWidth, setSegmentTrackWidth] = useState(0);
+  const [pagerWidth, setPagerWidth] = useState(0);
   const activeTabIndex = useMemo(
     () => Math.max(0, ADMIN_TABS.findIndex(({ key }) => key === tab)),
     [tab]
   );
-  const segmentTranslateX = useRef(new Animated.Value(0)).current;
-  const hasMeasuredSegmentRef = useRef(false);
-  const adminRootRef = useRef<React.ElementRef<typeof View>>(null);
-  const themeButtonRef = useRef<React.ElementRef<typeof View>>(null);
+
+  const visualIndex = useSharedValue(activeTabIndex);
+  const settledIndex = useSharedValue(activeTabIndex);
+  const dragStartIndex = useSharedValue(activeTabIndex);
+  const preparedPagerIndex = useSharedValue(activeTabIndex);
+  const pagerWidthValue = useSharedValue(0);
+  const segmentTrackWidthValue = useSharedValue(0);
+  const touchStartX = useSharedValue(0);
+  const touchStartY = useSharedValue(0);
+  const pagerChildInteractionSuspended = useSharedValue(false);
+  const pagerKeyboardSuspended = useSharedValue(false);
+  const activeTabIndexRef = useRef(activeTabIndex);
+  const requestedTabIndexRef = useRef(activeTabIndex);
 
   const segmentMetrics = useMemo(() => {
-    if (!segmentTrackWidth) {
-      return { width: 0, translateX: 0 };
-    }
+    if (!segmentTrackWidth) return { width: 0 };
     const innerWidth =
       segmentTrackWidth -
       ADMIN_SEGMENT_PADDING * 2 -
       ADMIN_SEGMENT_GAP * (ADMIN_TABS.length - 1);
-    const itemWidth = Math.max(innerWidth / ADMIN_TABS.length, 0);
-    return {
-      width: itemWidth,
-      translateX: ADMIN_SEGMENT_PADDING + activeTabIndex * (itemWidth + ADMIN_SEGMENT_GAP),
-    };
-  }, [activeTabIndex, segmentTrackWidth]);
+    return { width: Math.max(innerWidth / ADMIN_TABS.length, 0) };
+  }, [segmentTrackWidth]);
 
-  const getSegmentTranslateForIndex = useCallback(
-    (index: number) => {
-      if (!segmentTrackWidth) return 0;
-      const innerWidth =
-        segmentTrackWidth -
-        ADMIN_SEGMENT_PADDING * 2 -
-        ADMIN_SEGMENT_GAP * (ADMIN_TABS.length - 1);
-      const itemWidth = Math.max(innerWidth / ADMIN_TABS.length, 0);
-      return ADMIN_SEGMENT_PADDING + index * (itemWidth + ADMIN_SEGMENT_GAP);
-    },
-    [segmentTrackWidth]
+  const segmentItemWidth = useDerivedValue(() => {
+    const innerWidth =
+      segmentTrackWidthValue.value -
+      ADMIN_SEGMENT_PADDING * 2 -
+      ADMIN_SEGMENT_GAP * (ADMIN_TABS.length - 1);
+    return Math.max(innerWidth / ADMIN_TABS.length, 0);
+  });
+
+  const segmentIndicatorX = useDerivedValue(
+    () =>
+      ADMIN_SEGMENT_PADDING +
+      visualIndex.value * (segmentItemWidth.value + ADMIN_SEGMENT_GAP)
+  );
+
+  const segmentIndicatorStyle = useAnimatedStyle(() => ({
+    width: segmentItemWidth.value,
+    transform: [{ translateX: segmentIndicatorX.value }],
+  }));
+
+  const segmentOverlayTrackStyle = useAnimatedStyle(() => ({
+    width: segmentTrackWidthValue.value,
+    transform: [{ translateX: -segmentIndicatorX.value }],
+  }));
+
+  const pagerTrackStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: -visualIndex.value * pagerWidthValue.value }],
+  }));
+
+  const pagerSwipeControls = useMemo<SwipeableScreenControls>(
+    () => ({
+      setSwipeSuspended: (suspended) => {
+        pagerChildInteractionSuspended.value = suspended;
+      },
+    }),
+    [pagerChildInteractionSuspended]
   );
 
   // Block access if admin mode is off
   useEffect(() => {
-    if (state.isAdminMode) return;
+    if (!state.isInitialized || state.isAdminMode) return;
 
     const task = InteractionManager.runAfterInteractions(() => {
-      router.replace("/(tabs)/settings");
+      router.replace("/settings");
     });
 
     return () => {
       task.cancel?.();
     };
-  }, [state.isAdminMode, router]);
+  }, [state.isAdminMode, state.isInitialized, router]);
+
+  const markTabsMountedAround = useCallback((index: number, radius = 1) => {
+    setMountedTabs((prev) => includeMountedTabsAround(prev, index, radius));
+    setWarmTabs((prev) => includeMountedTabsAround(prev, index, radius));
+  }, []);
+
+  const commitTabByIndex = useCallback(
+    (nextIndex: number) => {
+      const nextTab = ADMIN_TABS[nextIndex]?.key;
+      if (!nextTab) return;
+      requestedTabIndexRef.current = nextIndex;
+      markTabsMountedAround(nextIndex);
+      setTab((prev) => (prev === nextTab ? prev : nextTab));
+    },
+    [markTabsMountedAround]
+  );
 
   const selectTab = useCallback(
     (nextTab: AdminTab) => {
-      if (nextTab === tab) return;
       const nextIndex = ADMIN_TABS.findIndex(({ key }) => key === nextTab);
-      if (segmentTrackWidth && nextIndex >= 0) {
-        Animated.timing(segmentTranslateX, {
-          toValue: getSegmentTranslateForIndex(nextIndex),
-          duration: 95,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }).start();
+      if (nextIndex < 0) return;
+      if (
+        requestedTabIndexRef.current === nextIndex &&
+        activeTabIndexRef.current === nextIndex
+      ) {
+        return;
       }
-      setMountedTabs((prev) =>
-        prev[nextTab]
-          ? prev
-          : {
-              ...prev,
-              [nextTab]: true,
-            }
+
+      requestedTabIndexRef.current = nextIndex;
+      markTabsMountedAround(nextIndex);
+      preparedPagerIndex.value = nextIndex;
+      settledIndex.value = nextIndex;
+      visualIndex.value = withTiming(
+        nextIndex,
+        { duration: ADMIN_PAGER_TAP_ANIMATION_MS },
+        (finished) => {
+          if (!finished) return;
+          settledIndex.value = nextIndex;
+          runOnJS(commitTabByIndex)(nextIndex);
+        }
       );
-      setTab(nextTab);
     },
-    [getSegmentTranslateForIndex, segmentTrackWidth, segmentTranslateX, tab]
+    [commitTabByIndex, markTabsMountedAround, preparedPagerIndex, settledIndex, visualIndex]
+  );
+
+  const handleSegmentLayout = useCallback(
+    (width: number) => {
+      setSegmentTrackWidth(width);
+      segmentTrackWidthValue.value = width;
+    },
+    [segmentTrackWidthValue]
+  );
+
+  const handlePagerLayout = useCallback(
+    (width: number) => {
+      setPagerWidth(width);
+      pagerWidthValue.value = width;
+    },
+    [pagerWidthValue]
   );
 
   useEffect(() => {
-    const task = InteractionManager.runAfterInteractions(() => {
-      setMountedTabs((prev) => ({
-        stats: true,
-        addresses: true,
-        mails: true,
-        sendbox: true,
-        unknown: true,
-        send: true,
-      }));
-    });
+    let cancelled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    let task: ReturnType<typeof InteractionManager.runAfterInteractions> | null = null;
+    const warmOrder = ADMIN_TABS.map((_, index) => index)
+      .filter((index) => Math.abs(index - ADMIN_INITIAL_TAB_INDEX) > 1)
+      .sort(
+        (a, b) =>
+          Math.abs(a - ADMIN_INITIAL_TAB_INDEX) - Math.abs(b - ADMIN_INITIAL_TAB_INDEX)
+      );
+    let cursor = 0;
+
+    const warmNext = () => {
+      if (cancelled || cursor >= warmOrder.length) return;
+      task = InteractionManager.runAfterInteractions(() => {
+        if (cancelled) return;
+        setWarmTabs((prev) => includeMountedTabsAround(prev, warmOrder[cursor], 0));
+        cursor += 1;
+        timeout = setTimeout(warmNext, 90);
+      });
+    };
+
+    timeout = setTimeout(warmNext, 160);
 
     return () => {
-      task.cancel?.();
+      cancelled = true;
+      if (timeout) clearTimeout(timeout);
+      task?.cancel?.();
     };
   }, []);
 
   useEffect(() => {
-    if (!segmentTrackWidth) return;
-
-    if (!hasMeasuredSegmentRef.current) {
-      hasMeasuredSegmentRef.current = true;
-      segmentTranslateX.setValue(segmentMetrics.translateX);
-      return;
+    activeTabIndexRef.current = activeTabIndex;
+    requestedTabIndexRef.current = activeTabIndex;
+    markTabsMountedAround(activeTabIndex);
+    preparedPagerIndex.value = activeTabIndex;
+    settledIndex.value = activeTabIndex;
+    if (Math.abs(visualIndex.value - activeTabIndex) > 0.01) {
+      visualIndex.value = withTiming(activeTabIndex, {
+        duration: ADMIN_PAGER_SETTLE_ANIMATION_MS,
+      });
     }
+  }, [activeTabIndex, markTabsMountedAround, preparedPagerIndex, settledIndex, visualIndex]);
 
-    Animated.timing(segmentTranslateX, {
-      toValue: segmentMetrics.translateX,
-      duration: 115,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [segmentMetrics.translateX, segmentTrackWidth, segmentTranslateX]);
+  useEffect(() => {
+    const showSub = Keyboard.addListener("keyboardDidShow", () => {
+      pagerKeyboardSuspended.value = true;
+    });
+    const hideSub = Keyboard.addListener("keyboardDidHide", () => {
+      pagerKeyboardSuspended.value = false;
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+      pagerKeyboardSuspended.value = false;
+    };
+  }, [pagerKeyboardSuspended]);
+
+  const pagerGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .manualActivation(true)
+        .maxPointers(1)
+        .cancelsTouchesInView(false)
+        .onTouchesDown((event) => {
+          const touch = getFirstGestureTouch(event);
+          if (!touch) return;
+          touchStartX.value = touch.x;
+          touchStartY.value = touch.y;
+        })
+        .onTouchesMove((event, manager) => {
+          if (
+            pagerWidthValue.value <= 0 ||
+            pagerChildInteractionSuspended.value ||
+            pagerKeyboardSuspended.value ||
+            (event.allTouches?.length ?? 0) > 1
+          ) {
+            manager.fail();
+            return;
+          }
+
+          const touch = getFirstGestureTouch(event);
+          if (!touch) return;
+
+          const deltaX = touch.x - touchStartX.value;
+          const deltaY = touch.y - touchStartY.value;
+          const absX = Math.abs(deltaX);
+          const absY = Math.abs(deltaY);
+
+          if (
+            absY >= ADMIN_PAGER_VERTICAL_FAIL_DISTANCE &&
+            absY > absX / ADMIN_PAGER_HORIZONTAL_DOMINANCE
+          ) {
+            manager.fail();
+            return;
+          }
+
+          if (
+            settledIndex.value <= 0 &&
+            deltaX >= ADMIN_PAGER_ACTIVATION_DISTANCE
+          ) {
+            manager.fail();
+            return;
+          }
+
+          if (
+            settledIndex.value >= ADMIN_TABS.length - 1 &&
+            deltaX <= -ADMIN_PAGER_ACTIVATION_DISTANCE
+          ) {
+            manager.fail();
+            return;
+          }
+
+          if (
+            absX >= ADMIN_PAGER_ACTIVATION_DISTANCE &&
+            absX > absY * ADMIN_PAGER_HORIZONTAL_DOMINANCE
+          ) {
+            manager.activate();
+          }
+        })
+        .onBegin(() => {
+          dragStartIndex.value = visualIndex.value;
+        })
+        .onUpdate((event) => {
+          if (pagerWidthValue.value <= 0) return;
+          const nextVisualIndex =
+            dragStartIndex.value - event.translationX / pagerWidthValue.value;
+          const clampedVisualIndex = clampPagerIndex(nextVisualIndex);
+          const nearestIndex = Math.round(clampedVisualIndex);
+          visualIndex.value = clampedVisualIndex;
+          if (nearestIndex !== preparedPagerIndex.value) {
+            preparedPagerIndex.value = nearestIndex;
+            runOnJS(markTabsMountedAround)(nearestIndex);
+          }
+        })
+        .onEnd((event) => {
+          if (pagerWidthValue.value <= 0) return;
+          const distanceThreshold =
+            pagerWidthValue.value * ADMIN_PAGER_TRIGGER_DISTANCE_RATIO;
+          const travelledPages = Math.abs(visualIndex.value - dragStartIndex.value);
+          const hasDecisiveSwipe =
+            Math.abs(event.translationX) >= distanceThreshold ||
+            Math.abs(event.velocityX) >= ADMIN_PAGER_TRIGGER_VELOCITY ||
+            travelledPages >= ADMIN_PAGER_TRIGGER_DISTANCE_RATIO;
+          const projectedIndex =
+            dragStartIndex.value -
+            (event.translationX + event.velocityX * ADMIN_PAGER_VELOCITY_PROJECTION_MS) /
+              pagerWidthValue.value;
+          let nextIndex = hasDecisiveSwipe
+            ? Math.round(projectedIndex)
+            : Math.round(dragStartIndex.value);
+
+          nextIndex = clampPagerIndex(nextIndex);
+          preparedPagerIndex.value = nextIndex;
+          runOnJS(markTabsMountedAround)(nextIndex);
+          visualIndex.value = withTiming(
+            nextIndex,
+            { duration: ADMIN_PAGER_SETTLE_ANIMATION_MS },
+            (finished) => {
+              if (!finished) return;
+              settledIndex.value = nextIndex;
+              runOnJS(commitTabByIndex)(nextIndex);
+            }
+          );
+        }),
+    [
+      dragStartIndex,
+      commitTabByIndex,
+      markTabsMountedAround,
+      pagerChildInteractionSuspended,
+      pagerKeyboardSuspended,
+      pagerWidthValue,
+      preparedPagerIndex,
+      settledIndex,
+      touchStartX,
+      touchStartY,
+      visualIndex,
+    ]
+  );
 
   const handleQuickThemeToggle = useCallback(() => {
-    const nextScheme = colorScheme === "dark" ? "light" : "dark";
+    const nextScheme = colorScheme === "light" ? lastDarkPreference : "light";
     setThemePreference(nextScheme);
-    setMiniToastMessage(nextScheme === "dark" ? "已切到深色" : "已切到浅色");
-  }, [colorScheme, setThemePreference]);
+    setMiniToastMessage(
+      nextScheme === "oled"
+        ? "已切到 OLED 黑"
+        : nextScheme === "dark"
+          ? "已切到深色"
+          : "已切到浅色"
+    );
+  }, [colorScheme, lastDarkPreference, setThemePreference]);
 
   const handleThemeSystemMode = useCallback(() => {
     setThemePreference("system");
@@ -537,9 +820,95 @@ export default function AdminScreen() {
   }, [setThemePreference]);
 
   const themeButtonLabel =
-    themePreference === "system" ? "系统" : colorScheme === "dark" ? "深色" : "浅色";
+    themePreference === "system"
+      ? "系统"
+      : colorScheme === "oled"
+        ? "OLED"
+        : colorScheme === "dark"
+          ? "深色"
+          : "浅色";
 
-  if (!state.isAdminMode) {
+  const handleOpenSettings = useCallback(() => {
+    router.push("/settings");
+  }, [router]);
+
+  const showMiniToast = useCallback((message: string) => {
+    setMiniToastMessage(message);
+  }, []);
+
+  const renderPagerPage = useCallback(
+    (pageTab: AdminTab) => {
+      const isPageActive = tab === pageTab;
+      let content: React.ReactNode = <View style={styles.adminPagerPlaceholder} />;
+
+      if (mountedTabs[pageTab]) {
+        if (pageTab === "stats") {
+          content = (
+            <MemoStatsPanel
+              colors={colors}
+              onNavigate={selectTab}
+              isActive={isPageActive}
+              shouldWarm={warmTabs.stats}
+            />
+          );
+        } else if (pageTab === "addresses") {
+          content = (
+            <MemoAddressesPanel
+              colors={colors}
+              onMiniToast={showMiniToast}
+              isActive={isPageActive}
+              shouldWarm={warmTabs.addresses}
+            />
+          );
+        } else if (pageTab === "mails") {
+          content = (
+            <MemoMailsPanel
+              colors={colors}
+              kind="inbox"
+              onMiniToast={showMiniToast}
+              isActive={isPageActive}
+              shouldWarm={warmTabs.mails}
+            />
+          );
+        } else if (pageTab === "sendbox") {
+          content = (
+            <MemoMailsPanel
+              colors={colors}
+              kind="sendbox"
+              onMiniToast={showMiniToast}
+              isActive={isPageActive}
+              shouldWarm={warmTabs.sendbox}
+            />
+          );
+        } else if (pageTab === "unknown") {
+          content = (
+            <MemoMailsPanel
+              colors={colors}
+              kind="unknown"
+              onMiniToast={showMiniToast}
+              isActive={isPageActive}
+              shouldWarm={warmTabs.unknown}
+            />
+          );
+        } else if (pageTab === "send") {
+          content = <MemoSendAsPanel colors={colors} />;
+        }
+      }
+
+      return (
+        <View
+          key={pageTab}
+          style={[styles.adminPagerPage, pagerWidth > 0 ? { width: pagerWidth } : null]}
+          pointerEvents={isPageActive ? "auto" : "none"}
+        >
+          {content}
+        </View>
+      );
+    },
+    [colors, mountedTabs, pagerWidth, selectTab, showMiniToast, tab, warmTabs]
+  );
+
+  if (!state.isInitialized || !state.isAdminMode) {
     return (
       <ScreenContainer edges={["top", "bottom", "left", "right"]}>
         <View style={styles.centerAll}>
@@ -551,7 +920,13 @@ export default function AdminScreen() {
 
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]}>
-      <View ref={adminRootRef} collapsable={false} style={styles.adminScreenRoot}>
+      <Stack.Screen
+        options={{
+          fullScreenGestureEnabled: activeTabIndex === 0,
+          gestureEnabled: activeTabIndex === 0,
+        }}
+      />
+      <View collapsable={false} style={styles.adminScreenRoot}>
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
         <View style={styles.headerLeft}>
           <Text style={[styles.headerTitle, { color: colors.foreground }]}>
@@ -559,7 +934,23 @@ export default function AdminScreen() {
           </Text>
         </View>
         <View style={styles.headerActions}>
-          <View ref={themeButtonRef} collapsable={false}>
+          <Pressable
+            onPress={handleOpenSettings}
+            style={({ pressed }) => [
+              styles.headerIconButton,
+              {
+                backgroundColor: colors.surface,
+                borderColor: colors.border,
+                opacity: pressed ? 0.78 : 1,
+              },
+            ]}
+          >
+            <IconSymbol name="gearshape.fill" size={16} color={colors.primary} />
+            <Text style={[styles.headerIconText, { color: colors.foreground }]}>
+              设置
+            </Text>
+          </Pressable>
+          <View collapsable={false}>
             <Pressable
               onPress={handleQuickThemeToggle}
               onLongPress={handleThemeSystemMode}
@@ -574,7 +965,7 @@ export default function AdminScreen() {
               ]}
             >
               <IconSymbol
-                name={colorScheme === "dark" ? "moon.fill" : "sun.max.fill"}
+                name={colorScheme === "light" ? "sun.max.fill" : "moon.fill"}
                 size={16}
                 color={colors.primary}
               />
@@ -588,7 +979,7 @@ export default function AdminScreen() {
 
       <View style={styles.segmentWrap}>
         <View
-          onLayout={(event) => setSegmentTrackWidth(event.nativeEvent.layout.width)}
+          onLayout={(event) => handleSegmentLayout(event.nativeEvent.layout.width)}
           style={[
             styles.segmentTrack,
             {
@@ -597,28 +988,20 @@ export default function AdminScreen() {
             },
           ]}
         >
-          {segmentMetrics.width > 0 ? (
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                styles.segmentIndicator,
-                {
-                  width: segmentMetrics.width,
-                  backgroundColor: colors.primary,
-                  transform: [{ translateX: segmentTranslateX }],
-                },
-              ]}
-            />
-          ) : null}
           {ADMIN_TABS.map(({ key, label }) => (
             <Pressable
               key={key}
-              onPress={() => selectTab(key)}
+              unstable_pressDelay={0}
+              onPressIn={() => selectTab(key)}
+              onPress={() => {
+                const nextIndex = ADMIN_TABS.findIndex((item) => item.key === key);
+                if (requestedTabIndexRef.current !== nextIndex) selectTab(key);
+              }}
               style={({ pressed }) => [
                 styles.segmentItem,
                 styles.segmentItemEqual,
                 {
-                  opacity: pressed ? 0.8 : 1,
+                  opacity: pressed ? 0.78 : 1,
                 },
               ]}
             >
@@ -626,119 +1009,71 @@ export default function AdminScreen() {
                 numberOfLines={1}
                 adjustsFontSizeToFit
                 minimumFontScale={0.92}
-                style={[
-                  styles.segmentText,
-                  { color: tab === key ? "#FFFFFF" : colors.foreground },
-                ]}
+                style={[styles.segmentText, { color: colors.foreground }]}
               >
                 {label}
               </Text>
             </Pressable>
           ))}
+          {segmentMetrics.width > 0 ? (
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.segmentIndicator,
+                { backgroundColor: colors.primary },
+                segmentIndicatorStyle,
+              ]}
+            >
+              <Animated.View
+                style={[
+                  styles.segmentOverlayTrack,
+                  segmentOverlayTrackStyle,
+                ]}
+              >
+                {ADMIN_TABS.map(({ key, label }) => (
+                  <View
+                    key={`active-${key}`}
+                    style={[
+                      styles.segmentOverlayItem,
+                      { width: segmentMetrics.width },
+                    ]}
+                  >
+                    <Text
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.92}
+                      style={[styles.segmentText, styles.segmentTextActive]}
+                    >
+                      {label}
+                    </Text>
+                  </View>
+                ))}
+              </Animated.View>
+            </Animated.View>
+          ) : null}
         </View>
       </View>
 
-      <View style={styles.adminPagerWrap}>
-        {mountedTabs.stats ? (
-          <View
-            style={[
-              styles.adminPagerPage,
-              tab !== "stats" && styles.adminPagerHiddenPage,
-            ]}
-            pointerEvents={tab === "stats" ? "auto" : "none"}
+      <SwipeableScreenContext.Provider value={pagerSwipeControls}>
+        <GestureDetector gesture={pagerGesture}>
+          <Animated.View
+            style={styles.adminPagerWrap}
+            onLayout={(event) => handlePagerLayout(event.nativeEvent.layout.width)}
           >
-            <StatsPanel
-              colors={colors}
-              onNavigate={selectTab}
-              isActive={tab === "stats"}
-              shouldWarm={mountedTabs.stats}
-            />
-          </View>
-        ) : null}
-
-        {mountedTabs.addresses ? (
-          <View
-            style={[
-              styles.adminPagerPage,
-              tab !== "addresses" && styles.adminPagerHiddenPage,
-            ]}
-            pointerEvents={tab === "addresses" ? "auto" : "none"}
-          >
-            <AddressesPanel
-              colors={colors}
-              onMiniToast={(message) => setMiniToastMessage(message)}
-              isActive={tab === "addresses"}
-              shouldWarm={mountedTabs.addresses}
-            />
-          </View>
-        ) : null}
-
-        {mountedTabs.mails ? (
-          <View
-            style={[
-              styles.adminPagerPage,
-              tab !== "mails" && styles.adminPagerHiddenPage,
-            ]}
-            pointerEvents={tab === "mails" ? "auto" : "none"}
-          >
-            <MailsPanel
-              colors={colors}
-              kind="inbox"
-              onMiniToast={(message) => setMiniToastMessage(message)}
-              isActive={tab === "mails"}
-              shouldWarm={mountedTabs.mails}
-            />
-          </View>
-        ) : null}
-
-        {mountedTabs.sendbox ? (
-          <View
-            style={[
-              styles.adminPagerPage,
-              tab !== "sendbox" && styles.adminPagerHiddenPage,
-            ]}
-            pointerEvents={tab === "sendbox" ? "auto" : "none"}
-          >
-            <MailsPanel
-              colors={colors}
-              kind="sendbox"
-              onMiniToast={(message) => setMiniToastMessage(message)}
-              isActive={tab === "sendbox"}
-              shouldWarm={mountedTabs.sendbox}
-            />
-          </View>
-        ) : null}
-
-        {mountedTabs.unknown ? (
-          <View
-            style={[
-              styles.adminPagerPage,
-              tab !== "unknown" && styles.adminPagerHiddenPage,
-            ]}
-            pointerEvents={tab === "unknown" ? "auto" : "none"}
-          >
-            <MailsPanel
-              colors={colors}
-              kind="unknown"
-              onMiniToast={(message) => setMiniToastMessage(message)}
-              isActive={tab === "unknown"}
-              shouldWarm={mountedTabs.unknown}
-            />
-          </View>
-        ) : null}
-
-        {mountedTabs.send ? (
-          <View
-            style={[
-              styles.adminPagerPage,
-              tab !== "send" && styles.adminPagerHiddenPage,
-            ]}
-            pointerEvents={tab === "send" ? "auto" : "none"}
-          >
-            <SendAsPanel colors={colors} />
-          </View>
-        ) : null}
-      </View>
+            <Animated.View
+              style={[
+                styles.adminPagerTrack,
+                pagerWidth > 0
+                  ? { width: pagerWidth * ADMIN_TABS.length }
+                  : null,
+                pagerTrackStyle,
+              ]}
+            >
+              {ADMIN_TABS.map(({ key }) => renderPagerPage(key))}
+            </Animated.View>
+          </Animated.View>
+        </GestureDetector>
+      </SwipeableScreenContext.Provider>
 
       <MiniToast
         message={miniToastMessage}
@@ -771,6 +1106,7 @@ function StatsPanel({
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const statsRef = useRef<AdminStatistics | null>(null);
@@ -780,21 +1116,30 @@ function StatsPanel({
     statsRef.current = stats;
   }, [stats]);
 
-  const commitStats = useCallback((nextStats: AdminStatistics) => {
+  const commitStats = useCallback((nextStats: AdminStatistics, options?: { defer?: boolean }) => {
     const updatedLabel = formatAdminPanelRefreshTime();
-    setStats(nextStats);
-    setLastUpdated(updatedLabel);
     adminStatsPanelCache = {
       data: nextStats,
       fetchedAt: Date.now(),
       updatedLabel,
     };
+    const applyState = () => {
+      setStats(nextStats);
+      setLastUpdated(updatedLabel);
+      setHasLoadedOnce(true);
+    };
+    if (options?.defer) {
+      startTransition(applyState);
+    } else {
+      applyState();
+    }
   }, []);
 
   const hydrateStatsCache = useCallback(() => {
     if (!adminStatsPanelCache) return false;
     setStats(adminStatsPanelCache.data);
     setLastUpdated(adminStatsPanelCache.updatedLabel);
+    setHasLoadedOnce(true);
     return true;
   }, []);
 
@@ -818,17 +1163,21 @@ function StatsPanel({
         fetchAdminStatistics(),
         fetchAdminUnknownMails({ limit: 1, offset: 0 }).catch(() => ({ count: 0 })),
       ]);
-      commitStats({
-        ...s,
-        unknow_mail_count:
-          typeof s.unknow_mail_count === "number" && s.unknow_mail_count > 0
-            ? s.unknow_mail_count
-            : unknownPage.count,
-      });
+      commitStats(
+        {
+          ...s,
+          unknow_mail_count:
+            typeof s.unknow_mail_count === "number" && s.unknow_mail_count > 0
+              ? s.unknow_mail_count
+              : unknownPage.count,
+        },
+        { defer: background || silent }
+      );
       setError(null);
     } catch (err: any) {
       if (!statsRef.current) {
         setError(err.message || "加载失败");
+        setHasLoadedOnce(true);
       }
     } finally {
       if (refresh) {
@@ -852,21 +1201,21 @@ function StatsPanel({
     if (!didInitialLoadRef.current) {
       didInitialLoadRef.current = true;
       if (shouldRefresh) {
-        void load(isActive ? (hydrated ? { background: true } : undefined) : { silent: true });
+        void load(
+          isActive
+            ? hydrated
+              ? { background: true }
+              : undefined
+            : { silent: true }
+        );
       }
       return;
     }
 
+    if (!isActive) return;
+
     if (shouldRefresh) {
-      void load(
-        isActive
-          ? statsRef.current
-            ? { background: true }
-            : hydrated
-              ? { background: true }
-              : undefined
-          : { silent: true }
-      );
+      void load(statsRef.current || hydrated ? { background: true } : undefined);
     }
   }, [hydrateStatsCache, isActive, load, shouldWarm]);
 
@@ -973,7 +1322,7 @@ function StatsPanel({
             />
           </View>
         </>
-      ) : (
+      ) : hasLoadedOnce ? (
         <PanelStateCard
           colors={colors}
           icon="tray.fill"
@@ -981,6 +1330,14 @@ function StatsPanel({
           subtitle="稍后再刷新看看"
           actionLabel="刷新"
           onAction={() => load()}
+        />
+      ) : (
+        <PanelStateCard
+          colors={colors}
+          loading
+          icon="arrow.clockwise"
+          title="正在准备统计"
+          subtitle="统计数据正在后台预热。"
         />
       )}
     </ScrollView>
@@ -1011,6 +1368,7 @@ function AddressesPanel({
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [count, setCount] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -1097,10 +1455,6 @@ function AddressesPanel({
     setGroupMemberships(next.memberships);
   }, [groupScope]);
 
-  useEffect(() => {
-    void loadGroupsState();
-  }, [loadGroupsState]);
-
   const domains = useMemo(() => mailState.settings?.domains || [], [mailState.settings?.domains]);
   const domainLabels = useMemo(
     () => mailState.settings?.domainLabels || [],
@@ -1130,8 +1484,8 @@ function AddressesPanel({
   }, [groupMemberships]);
 
   useEffect(() => {
-    if (mailState.isConfigured) loadSettings();
-  }, [mailState.isConfigured, loadSettings]);
+    if (isActive && mailState.isConfigured) loadSettings();
+  }, [isActive, mailState.isConfigured, loadSettings]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -1156,19 +1510,33 @@ function AddressesPanel({
   }, [domains, selectedDomain]);
 
   const commitPanelState = useCallback(
-    (nextData: AdminAddress[], nextCount: number, nextOffset: number, q: string) => {
+    (
+      nextData: AdminAddress[],
+      nextCount: number,
+      nextOffset: number,
+      q: string,
+      options?: { defer?: boolean }
+    ) => {
       dataRef.current = nextData;
       countRef.current = nextCount;
       offsetRef.current = nextOffset;
-      setData(nextData);
-      setCount(nextCount);
-      setOffset(nextOffset);
       adminAddressesPanelCache.set(buildAdminAddressesCacheKey(q), {
         count: nextCount,
         data: nextData,
         offset: nextOffset,
         fetchedAt: Date.now(),
       });
+      const applyState = () => {
+        setData(nextData);
+        setCount(nextCount);
+        setOffset(nextOffset);
+        setHasLoadedOnce(true);
+      };
+      if (options?.defer) {
+        startTransition(applyState);
+      } else {
+        applyState();
+      }
     },
     []
   );
@@ -1183,6 +1551,7 @@ function AddressesPanel({
       setData(cached.data);
       setCount(cached.count);
       setOffset(cached.offset);
+      setHasLoadedOnce(true);
       return true;
     },
     [query]
@@ -1220,7 +1589,9 @@ function AddressesPanel({
           freshOffset === 0 ? page.results : [...dataRef.current, ...page.results];
         const nextOffset =
           freshOffset === 0 ? page.results.length : freshOffset + page.results.length;
-        commitPanelState(nextData, page.count, nextOffset, q);
+        commitPanelState(nextData, page.count, nextOffset, q, {
+          defer: background || silent,
+        });
       } catch (err: any) {
         const message = err.message || "加载失败";
         if (freshOffset === 0 && dataRef.current.length === 0) {
@@ -1228,6 +1599,7 @@ function AddressesPanel({
           setData([]);
           setCount(0);
           setOffset(0);
+          setHasLoadedOnce(true);
         } else if (!silent) {
           Alert.alert("加载失败", message);
         }
@@ -1259,14 +1631,20 @@ function AddressesPanel({
         void load(
           0,
           query,
-          isActive ? (hydrated ? { background: true } : undefined) : { silent: true }
+          isActive
+            ? hydrated
+              ? { background: true }
+              : undefined
+            : { silent: true }
         );
       }
       return;
     }
 
+    if (!isActive) return;
+
     if (shouldRefresh) {
-      void load(0, query, isActive ? { background: hydrated } : { silent: true });
+      void load(0, query, { background: hydrated });
     }
   }, [hydrateCachedPanel, isActive, load, query, shouldWarm]);
 
@@ -1301,7 +1679,7 @@ function AddressesPanel({
     void load(0, "", { silent: hydrated });
   };
 
-  const handleDelete = (item: AdminAddress) => {
+  const handleDelete = useCallback((item: AdminAddress) => {
     Alert.alert(
       "删除地址",
       `确定要从服务器删除 ${item.name}? 该操作不可恢复。`,
@@ -1321,9 +1699,9 @@ function AddressesPanel({
         },
       ]
     );
-  };
+  }, []);
 
-  const handleClearInbox = (item: AdminAddress) => {
+  const handleClearInbox = useCallback((item: AdminAddress) => {
     Alert.alert("清空收件箱", `清空 ${item.name} 的收件箱？`, [
       { text: "取消", style: "cancel" },
       {
@@ -1339,9 +1717,9 @@ function AddressesPanel({
         },
       },
     ]);
-  };
+  }, []);
 
-  const handleShowCredential = async (item: AdminAddress) => {
+  const handleShowCredential = useCallback(async (item: AdminAddress) => {
     try {
       const cred = await adminShowAddressCredential(item.id);
       setShowCred({
@@ -1352,7 +1730,11 @@ function AddressesPanel({
     } catch (err: any) {
       Alert.alert("获取凭证失败", err.message || "");
     }
-  };
+  }, []);
+
+  const handleGroupAddress = useCallback((item: AdminAddress) => {
+    setGroupingAddress(item);
+  }, []);
 
   const previewAddress = useMemo(() => {
     const name = buildMailboxName(newName.trim() || "name", customPrefix);
@@ -1531,6 +1913,32 @@ function AddressesPanel({
     query,
   ]);
 
+  const renderAddressItem = useCallback(
+    ({ item }: { item: AddressListItemData }) => (
+      <AddressListItem
+        item={item}
+        colors={colors}
+        query={query}
+        highlightStyle={highlightStyle}
+        onOpen={handleOpenAddress}
+        onGroup={handleGroupAddress}
+        onShowCredential={handleShowCredential}
+        onClearInbox={handleClearInbox}
+        onDelete={handleDelete}
+      />
+    ),
+    [
+      colors,
+      handleClearInbox,
+      handleDelete,
+      handleGroupAddress,
+      handleOpenAddress,
+      handleShowCredential,
+      highlightStyle,
+      query,
+    ]
+  );
+
   return (
     <View style={{ flex: 1 }}>
       <View style={[styles.addressToolbar, { borderBottomColor: colors.border }]}>
@@ -1552,66 +1960,21 @@ function AddressesPanel({
             autoCapitalize="none"
           />
         </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.groupFilterRow}
-        >
-          <Pressable
-            onPress={() => setGroupFilter("all")}
-            style={({ pressed }) => [
-              styles.groupFilterChip,
-              {
-                backgroundColor:
-                  groupFilter === "all" ? `${colors.primary}14` : colors.surface,
-                borderColor:
-                  groupFilter === "all" ? `${colors.primary}30` : colors.border,
-                opacity: pressed ? 0.78 : 1,
-              },
-            ]}
+        <SwipeSuspendView>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.groupFilterRow}
           >
-            <Text
-              style={[
-                styles.groupFilterChipText,
-                { color: groupFilter === "all" ? colors.primary : colors.muted },
-              ]}
-            >
-              全部
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setGroupFilter("ungrouped")}
-            style={({ pressed }) => [
-              styles.groupFilterChip,
-              {
-                backgroundColor:
-                  groupFilter === "ungrouped" ? `${colors.primary}14` : colors.surface,
-                borderColor:
-                  groupFilter === "ungrouped" ? `${colors.primary}30` : colors.border,
-                opacity: pressed ? 0.78 : 1,
-              },
-            ]}
-          >
-            <Text
-              style={[
-                styles.groupFilterChipText,
-                { color: groupFilter === "ungrouped" ? colors.primary : colors.muted },
-              ]}
-            >
-              未分组
-            </Text>
-          </Pressable>
-          {addressGroups.map((group) => (
             <Pressable
-              key={group.id}
-              onPress={() => setGroupFilter(group.id)}
+              onPress={() => setGroupFilter("all")}
               style={({ pressed }) => [
                 styles.groupFilterChip,
                 {
                   backgroundColor:
-                    groupFilter === group.id ? `${colors.primary}14` : colors.surface,
+                    groupFilter === "all" ? `${colors.primary}14` : colors.surface,
                   borderColor:
-                    groupFilter === group.id ? `${colors.primary}30` : colors.border,
+                    groupFilter === "all" ? `${colors.primary}30` : colors.border,
                   opacity: pressed ? 0.78 : 1,
                 },
               ]}
@@ -1619,14 +1982,67 @@ function AddressesPanel({
               <Text
                 style={[
                   styles.groupFilterChipText,
-                  { color: groupFilter === group.id ? colors.primary : colors.muted },
+                  { color: groupFilter === "all" ? colors.primary : colors.muted },
                 ]}
               >
-                {group.name}
+                全部
               </Text>
             </Pressable>
-          ))}
-        </ScrollView>
+            <Pressable
+              onPress={() => setGroupFilter("ungrouped")}
+              style={({ pressed }) => [
+                styles.groupFilterChip,
+                {
+                  backgroundColor:
+                    groupFilter === "ungrouped" ? `${colors.primary}14` : colors.surface,
+                  borderColor:
+                    groupFilter === "ungrouped" ? `${colors.primary}30` : colors.border,
+                  opacity: pressed ? 0.78 : 1,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.groupFilterChipText,
+                  {
+                    color:
+                      groupFilter === "ungrouped" ? colors.primary : colors.muted,
+                  },
+                ]}
+              >
+                未分组
+              </Text>
+            </Pressable>
+            {addressGroups.map((group) => (
+              <Pressable
+                key={group.id}
+                onPress={() => setGroupFilter(group.id)}
+                style={({ pressed }) => [
+                  styles.groupFilterChip,
+                  {
+                    backgroundColor:
+                      groupFilter === group.id ? `${colors.primary}14` : colors.surface,
+                    borderColor:
+                      groupFilter === group.id ? `${colors.primary}30` : colors.border,
+                    opacity: pressed ? 0.78 : 1,
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.groupFilterChipText,
+                    {
+                      color:
+                        groupFilter === group.id ? colors.primary : colors.muted,
+                    },
+                  ]}
+                >
+                  {group.name}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </SwipeSuspendView>
         <View style={styles.addressToolbarFooter}>
           <View style={styles.addressToolbarCopy}>
             <Text style={[styles.panelEyebrow, { color: colors.primary }]}>
@@ -1744,9 +2160,10 @@ function AddressesPanel({
           data={filteredData}
           keyExtractor={(item) => String(item.id)}
           removeClippedSubviews
-          initialNumToRender={12}
-          maxToRenderPerBatch={10}
-          windowSize={8}
+          initialNumToRender={8}
+          maxToRenderPerBatch={6}
+          updateCellsBatchingPeriod={24}
+          windowSize={5}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={[
             styles.addressListContent,
@@ -1768,9 +2185,9 @@ function AddressesPanel({
             }
           }}
           onEndReachedThreshold={0.5}
-          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          ItemSeparatorComponent={AddressItemSeparator}
           ListEmptyComponent={
-            !isLoading ? (
+            !isLoading && hasLoadedOnce ? (
               <PanelStateCard
                 colors={colors}
                 icon={query.trim() ? "magnifyingglass" : "at"}
@@ -1783,158 +2200,22 @@ function AddressesPanel({
                 actionLabel={query.trim() ? "清空搜索" : undefined}
                 onAction={query.trim() ? handleResetSearch : undefined}
               />
-            ) : null
+            ) : (
+              <PanelStateCard
+                colors={colors}
+                loading
+                icon="arrow.clockwise"
+                title="正在准备地址"
+                subtitle="地址列表正在后台预热。"
+              />
+            )
           }
           ListFooterComponent={
             isLoading ? (
               <ActivityIndicator style={{ marginVertical: 20 }} color={colors.primary} />
             ) : null
           }
-          renderItem={({ item }) => {
-            const updatedText = item.updated_at
-              ? new Date(item.updated_at).toLocaleString("zh-CN", {
-                  month: "numeric",
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })
-              : null;
-
-            return (
-              <Pressable
-                onPress={() => handleOpenAddress(item)}
-                style={[
-                  styles.addressCompactCard,
-                  {
-                    backgroundColor: colors.surface,
-                    borderColor: colors.border,
-                  },
-                ]}
-              >
-                <View style={styles.addressCompactTop}>
-                  <View style={styles.addressCompactBody}>
-                    <View style={styles.addressCompactTitleRow}>
-                      <HighlightText
-                        text={item.name}
-                        query={query}
-                        style={[styles.addressTitle, { color: colors.foreground }]}
-                        highlightStyle={highlightStyle}
-                        numberOfLines={1}
-                      />
-                    </View>
-                    <HighlightText
-                      text={`#${item.id}${updatedText ? ` · 更新于 ${updatedText}` : ""}`}
-                      query={query}
-                      style={[styles.addressSubtitle, { color: colors.muted }]}
-                      highlightStyle={highlightStyle}
-                      numberOfLines={1}
-                    />
-                    <View style={styles.addressGroupSummaryRow}>
-                      {item.groups && item.groups.length > 0 ? (
-                        <>
-                          {item.groups.slice(0, 2).map((group) => (
-                            <AddressGroupChip
-                              key={group.id}
-                              group={group}
-                              colors={colors}
-                              compact
-                            />
-                          ))}
-                          {item.groups.length > 2 ? (
-                            <AddressGroupSummaryChip
-                              label={`+${item.groups.length - 2}`}
-                              colors={colors}
-                            />
-                          ) : null}
-                        </>
-                      ) : (
-                        <AddressGroupSummaryChip label="未分组" colors={colors} />
-                      )}
-                    </View>
-                  </View>
-                  <View style={styles.addressStatsRow}>
-                    <AddressStatChip colors={colors} label={`${item.mail_count ?? 0} 收件`} />
-                    <AddressStatChip colors={colors} label={`${item.send_count ?? 0} 发件`} />
-                  </View>
-                </View>
-
-                <View style={styles.addressCompactActions}>
-                  <Pressable
-                    onPress={(event) => {
-                      event.stopPropagation();
-                      setGroupingAddress(item);
-                    }}
-                    style={({ pressed }) => [
-                      styles.addressCompactAction,
-                      {
-                        backgroundColor: colors.background,
-                        borderColor: colors.border,
-                        opacity: pressed ? 0.72 : 1,
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.addressCompactActionText,
-                        { color: colors.foreground },
-                      ]}
-                    >
-                      分组
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => handleShowCredential(item)}
-                    style={({ pressed }) => [
-                      styles.addressCompactAction,
-                      {
-                        backgroundColor: `${colors.primary}12`,
-                        borderColor: `${colors.primary}22`,
-                        opacity: pressed ? 0.72 : 1,
-                      },
-                    ]}
-                  >
-                    <Text style={[styles.addressCompactActionText, { color: colors.primary }]}>
-                      凭证
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => handleClearInbox(item)}
-                    style={({ pressed }) => [
-                      styles.addressCompactAction,
-                      {
-                        backgroundColor: colors.background,
-                        borderColor: colors.border,
-                        opacity: pressed ? 0.72 : 1,
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.addressCompactActionText,
-                        { color: colors.foreground },
-                      ]}
-                    >
-                      清空收件
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => handleDelete(item)}
-                    style={({ pressed }) => [
-                      styles.addressCompactDangerAction,
-                      {
-                        backgroundColor: `${colors.error}10`,
-                        opacity: pressed ? 0.72 : 1,
-                      },
-                    ]}
-                  >
-                    <Text style={[styles.addressCompactActionText, { color: colors.error }]}>
-                      删除
-                    </Text>
-                  </Pressable>
-                </View>
-              </Pressable>
-            );
-          }}
+          renderItem={renderAddressItem}
         />
       )}
       <Modal
@@ -2466,6 +2747,7 @@ function MailsPanel({
   const [offset, setOffset] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [mailGroupFilter, setMailGroupFilter] = useState<"all" | "ungrouped" | string>("all");
   const [showMailGroupFilterMenu, setShowMailGroupFilterMenu] = useState(false);
   const [mailFilterMenuFrame, setMailFilterMenuFrame] = useState<MailFilterMenuFrame | null>(null);
@@ -2576,21 +2858,30 @@ function MailsPanel({
       nextData: ParsedMail[],
       nextCount: number,
       nextOffset: number,
-      queryToken: string
+      queryToken: string,
+      options?: { defer?: boolean }
     ) => {
       dataRef.current = nextData;
       countRef.current = nextCount;
       offsetRef.current = nextOffset;
       queryRef.current = queryToken;
-      setData(nextData);
-      setCount(nextCount);
-      setOffset(nextOffset);
       adminMailPanelCache.set(buildAdminMailCacheKey(kind, queryToken), {
         count: nextCount,
         data: nextData,
         offset: nextOffset,
         fetchedAt: Date.now(),
       });
+      const applyState = () => {
+        setData(nextData);
+        setCount(nextCount);
+        setOffset(nextOffset);
+        setHasLoadedOnce(true);
+      };
+      if (options?.defer) {
+        startTransition(applyState);
+      } else {
+        applyState();
+      }
     },
     [kind]
   );
@@ -2663,7 +2954,9 @@ function MailsPanel({
               : page.results.length
             : freshOffset + page.results.length;
 
-        commitPanelState(nextData, page.count, nextOffset, queryToken);
+        commitPanelState(nextData, page.count, nextOffset, queryToken, {
+          defer: background || silent,
+        });
       } catch (err: any) {
         if (requestId === requestIdRef.current && !silent) {
           Alert.alert("加载失败", err.message || "");
@@ -2697,7 +2990,9 @@ function MailsPanel({
           cached &&
           Date.now() - cached.fetchedAt < SEARCH_DATASET_TTL
         ) {
-          commitPanelState(cached.data, cached.count, cached.data.length, "__search__");
+          commitPanelState(cached.data, cached.count, cached.data.length, "__search__", {
+            defer: background || silent,
+          });
           return;
         }
 
@@ -2739,7 +3034,9 @@ function MailsPanel({
           data: mergedData,
           fetchedAt: Date.now(),
         });
-        commitPanelState(mergedData, totalCount, mergedData.length, "__search__");
+        commitPanelState(mergedData, totalCount, mergedData.length, "__search__", {
+          defer: background || silent,
+        });
       } catch (err: any) {
         if (requestId === requestIdRef.current && !silent) {
           Alert.alert("搜索失败", err.message || "");
@@ -2775,18 +3072,32 @@ function MailsPanel({
       if (trimmed) {
         void loadSearchDataset(
           false,
-          isActive ? (dataRef.current.length > 0 ? { background: true } : undefined) : { silent: true }
+          isActive
+            ? dataRef.current.length > 0
+              ? { background: true }
+              : undefined
+            : { silent: true }
         );
       } else if (shouldRefresh) {
-        void load(0, "", isActive ? (hydrated ? { background: true } : undefined) : { silent: true });
+        void load(
+          0,
+          "",
+          isActive
+            ? hydrated
+              ? { background: true }
+              : undefined
+            : { silent: true }
+        );
       }
       return;
     }
 
+    if (!isActive) return;
+
     if (trimmed) {
-      void loadSearchDataset(false, isActive ? { background: true } : { silent: true });
+      void loadSearchDataset(false, { background: true });
     } else if (shouldRefresh) {
-      void load(0, "", isActive ? { background: true } : { silent: true });
+      void load(0, "", { background: true });
     }
   }, [address, hydrateCachedPanel, isActive, kind, load, loadSearchDataset, shouldWarm]);
 
@@ -2901,7 +3212,7 @@ function MailsPanel({
     }
   }, [onMiniToast]);
 
-  const handleDelete = (mail: ParsedMail) => {
+  const handleDelete = useCallback((mail: ParsedMail) => {
     Alert.alert("删除邮件", mail.subject || "(无主题)", [
       { text: "取消", style: "cancel" },
       {
@@ -2928,7 +3239,7 @@ function MailsPanel({
         },
       },
     ]);
-  };
+  }, [clearKindCaches, commitPanelState, kind]);
 
   const markUnknownAddressCreated = useCallback((targetAddress: string) => {
     const normalized = normalizeGroupAddress(targetAddress);
@@ -2982,6 +3293,38 @@ function MailsPanel({
       }
     },
     [kind, markUnknownAddressCreated, onMiniToast, refreshAfterUnknownCreate]
+  );
+
+  const renderMailItem = useCallback(
+    ({ item }: { item: ParsedMail }) => (
+      <MailListItem
+        item={item}
+        kind={kind}
+        colors={colors}
+        searchQuery={deferredAddress}
+        metaQuery={address}
+        highlightStyle={highlightStyle}
+        createdUnknownAddresses={createdUnknownAddresses}
+        creatingAddress={creatingAddress}
+        onOpen={handleOpenMail}
+        onDelete={handleDelete}
+        onCopyCode={handleCopyCode}
+        onCreateAddressFromUnknown={handleCreateAddressFromUnknown}
+      />
+    ),
+    [
+      address,
+      colors,
+      createdUnknownAddresses,
+      creatingAddress,
+      deferredAddress,
+      handleCopyCode,
+      handleCreateAddressFromUnknown,
+      handleDelete,
+      handleOpenMail,
+      highlightStyle,
+      kind,
+    ]
   );
 
   const emptyConfig =
@@ -3129,9 +3472,10 @@ function MailsPanel({
         data={visibleData}
         keyExtractor={(item) => `${kind}-${item.id}`}
         removeClippedSubviews
-        initialNumToRender={12}
-        maxToRenderPerBatch={10}
-        windowSize={8}
+        initialNumToRender={8}
+        maxToRenderPerBatch={6}
+        updateCellsBatchingPeriod={24}
+        windowSize={5}
         keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
@@ -3161,159 +3505,9 @@ function MailsPanel({
             <ActivityIndicator style={{ margin: 20 }} color={colors.primary} />
           ) : null
         }
-        renderItem={({ item }) => {
-          const preview = getMailPreview(item, 68) || "(无内容)";
-          const code = getVerificationCode(item);
-          const senderAddress = item.from?.address || item.ownerAddress || "—";
-          const senderLabel = item.from?.name || getSenderDisplay(item);
-          const recipientAddress =
-            item.to?.[0]?.address || getMailRecipientsDisplay(item) || "—";
-          const recipientLabel = item.to?.[0]?.name || "";
-          const primaryAddress = kind === "sendbox" ? recipientAddress : senderAddress;
-          const primaryLabel = kind === "sendbox" ? recipientLabel : senderLabel;
-          const managedAddress = getManagedAddressForMail(item, kind);
-          const unknownRecipientAddress =
-            managedAddress || item.ownerAddress || recipientAddress || "—";
-          const createdUnknownKey = normalizeGroupAddress(unknownRecipientAddress);
-          const isUnknownCreated =
-            kind === "unknown" && !!createdUnknownAddresses[createdUnknownKey];
-          const canCreateUnknownAddress = !!splitMailboxAddress(unknownRecipientAddress);
-          const showUnknownCreate = kind === "unknown";
-          const tertiaryMeta =
-            kind === "sendbox"
-              ? `发件 ${formatMailboxDisplay(item.from, { addressFirst: true }) || item.ownerAddress || "—"} · ${formatMailDate(item.date || item.createdAt)}`
-              : kind === "unknown"
-              ? `收件 ${unknownRecipientAddress} · ${formatMailDate(item.date || item.createdAt)}`
-              : item.ownerAddress
-                ? `收件 ${item.ownerAddress} · ${formatMailDate(item.date || item.createdAt)}`
-                : formatMailDate(item.date || item.createdAt);
-
-          return (
-            <Pressable
-              onPress={() => handleOpenMail(item)}
-              onLongPress={() => handleDelete(item)}
-              delayLongPress={400}
-              style={({ pressed }) => [
-                styles.compactMailItem,
-                {
-                  backgroundColor: colors.surface,
-                  borderBottomColor: colors.border,
-                  opacity: pressed ? 0.7 : 1,
-                },
-              ]}
-            >
-              <View style={styles.compactMailTop}>
-                <View style={styles.compactMailTitleWrap}>
-                  <HighlightText
-                    text={item.subject || "(无主题)"}
-                    query={deferredAddress}
-                    style={[styles.compactMailSubject, { color: colors.foreground }]}
-                    highlightStyle={highlightStyle}
-                    numberOfLines={1}
-                  />
-                  <HighlightText
-                    text={`${primaryAddress}${primaryLabel && primaryLabel !== primaryAddress ? ` · ${primaryLabel}` : ""}`}
-                    query={deferredAddress}
-                    style={[styles.compactMailSender, { color: colors.muted }]}
-                    highlightStyle={highlightStyle}
-                    numberOfLines={1}
-                  />
-                  <HighlightText
-                    text={preview}
-                    query={deferredAddress}
-                    style={[styles.compactMailPreview, { color: colors.muted }]}
-                    highlightStyle={highlightStyle}
-                    numberOfLines={1}
-                  />
-                  <View style={styles.mailCardFooterRow}>
-                    <View style={styles.mailCardFooterMeta}>
-                      <HighlightText
-                        text={tertiaryMeta}
-                        query={address}
-                        style={[styles.adminMetaText, { color: colors.muted }]}
-                        highlightStyle={highlightStyle}
-                        numberOfLines={1}
-                      />
-                    </View>
-                  </View>
-                </View>
-                <View style={styles.compactMailAside}>
-                  <Text
-                    style={[styles.mailDate, styles.compactMailDate, { color: colors.muted }]}
-                    numberOfLines={1}
-                  >
-                    {formatMailDate(item.date || item.createdAt)}
-                  </Text>
-                  {code ? (
-                    <Pressable
-                      onPress={() => handleCopyCode(code)}
-                      style={({ pressed }) => [
-                        styles.compactCodePill,
-                        {
-                          backgroundColor: `${colors.primary}12`,
-                          borderColor: `${colors.primary}2A`,
-                          opacity: pressed ? 0.7 : 1,
-                        },
-                      ]}
-                    >
-                      <HighlightText
-                        text={code}
-                        query={deferredAddress}
-                        style={[styles.compactCodePillText, { color: colors.primary }]}
-                        highlightStyle={highlightStyle}
-                        numberOfLines={1}
-                      />
-                    </Pressable>
-                  ) : null}
-                  {showUnknownCreate ? (
-                    <Pressable
-                      onPress={() => void handleCreateAddressFromUnknown(item)}
-                      disabled={
-                        isUnknownCreated ||
-                        creatingAddress === managedAddress ||
-                        !canCreateUnknownAddress
-                      }
-                      style={({ pressed }) => [
-                        styles.compactAsideAction,
-                        {
-                          backgroundColor: isUnknownCreated
-                            ? `${colors.success}10`
-                            : `${colors.primary}10`,
-                          borderColor: isUnknownCreated
-                            ? `${colors.success}28`
-                            : `${colors.primary}26`,
-                          opacity:
-                            isUnknownCreated ||
-                            creatingAddress === managedAddress ||
-                            !canCreateUnknownAddress ||
-                            pressed
-                              ? 0.74
-                              : 1,
-                        },
-                      ]}
-                    >
-                      <Text
-                        numberOfLines={1}
-                        style={[
-                          styles.compactAsideActionText,
-                          { color: isUnknownCreated ? colors.success : colors.primary },
-                        ]}
-                      >
-                        {isUnknownCreated
-                          ? "已创建"
-                          : creatingAddress === managedAddress
-                            ? "创建中"
-                            : "创建"}
-                      </Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              </View>
-            </Pressable>
-          );
-        }}
+        renderItem={renderMailItem}
         ListEmptyComponent={
-          !isLoading ? (
+          !isLoading && hasLoadedOnce ? (
             <View style={styles.centerAll}>
               <IconSymbol
                 name={emptyConfig.icon}
@@ -3327,7 +3521,17 @@ function MailsPanel({
                 {emptyConfig.subtitle}
               </Text>
             </View>
-          ) : null
+          ) : (
+            <View style={styles.centerAll}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
+                正在准备邮件
+              </Text>
+              <Text style={[styles.emptySubtitle, { color: colors.muted }]}>
+                邮件列表正在后台预热。
+              </Text>
+            </View>
+          )
         }
       />
     </View>
@@ -3335,6 +3539,353 @@ function MailsPanel({
 }
 
 // ─── Send As (admin) ──────────────────────────────────────────
+type AdminPalette = ReturnType<typeof useColors>;
+type AddressListItemData = AdminAddress & { groups?: AddressGroup[] };
+
+const AddressItemSeparator = React.memo(function AddressItemSeparator() {
+  return <View style={styles.addressItemSeparator} />;
+});
+
+const AddressListItem = React.memo(function AddressListItem({
+  item,
+  colors,
+  query,
+  highlightStyle,
+  onOpen,
+  onGroup,
+  onShowCredential,
+  onClearInbox,
+  onDelete,
+}: {
+  item: AddressListItemData;
+  colors: AdminPalette;
+  query: string;
+  highlightStyle: StyleProp<TextStyle>;
+  onOpen: (item: AdminAddress) => void;
+  onGroup: (item: AdminAddress) => void;
+  onShowCredential: (item: AdminAddress) => void;
+  onClearInbox: (item: AdminAddress) => void;
+  onDelete: (item: AdminAddress) => void;
+}) {
+  const updatedText = useMemo(
+    () =>
+      item.updated_at
+        ? new Date(item.updated_at).toLocaleString("zh-CN", {
+            month: "numeric",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : null,
+    [item.updated_at]
+  );
+
+  return (
+    <Pressable
+      onPress={() => onOpen(item)}
+      style={[
+        styles.addressCompactCard,
+        {
+          backgroundColor: colors.surface,
+          borderColor: colors.border,
+        },
+      ]}
+    >
+      <View style={styles.addressCompactTop}>
+        <View style={styles.addressCompactBody}>
+          <View style={styles.addressCompactTitleRow}>
+            <HighlightText
+              text={item.name}
+              query={query}
+              style={[styles.addressTitle, { color: colors.foreground }]}
+              highlightStyle={highlightStyle}
+              numberOfLines={1}
+            />
+          </View>
+          <HighlightText
+            text={`#${item.id}${updatedText ? ` · 更新于 ${updatedText}` : ""}`}
+            query={query}
+            style={[styles.addressSubtitle, { color: colors.muted }]}
+            highlightStyle={highlightStyle}
+            numberOfLines={1}
+          />
+          <View style={styles.addressGroupSummaryRow}>
+            {item.groups && item.groups.length > 0 ? (
+              <>
+                {item.groups.slice(0, 2).map((group) => (
+                  <AddressGroupChip key={group.id} group={group} colors={colors} compact />
+                ))}
+                {item.groups.length > 2 ? (
+                  <AddressGroupSummaryChip
+                    label={`+${item.groups.length - 2}`}
+                    colors={colors}
+                  />
+                ) : null}
+              </>
+            ) : (
+              <AddressGroupSummaryChip label="未分组" colors={colors} />
+            )}
+          </View>
+        </View>
+        <View style={styles.addressStatsRow}>
+          <AddressStatChip colors={colors} label={`${item.mail_count ?? 0} 收件`} />
+          <AddressStatChip colors={colors} label={`${item.send_count ?? 0} 发件`} />
+        </View>
+      </View>
+
+      <View style={styles.addressCompactActions}>
+        <Pressable
+          onPress={(event) => {
+            event.stopPropagation();
+            onGroup(item);
+          }}
+          style={({ pressed }) => [
+            styles.addressCompactAction,
+            {
+              backgroundColor: colors.background,
+              borderColor: colors.border,
+              opacity: pressed ? 0.72 : 1,
+            },
+          ]}
+        >
+          <Text style={[styles.addressCompactActionText, { color: colors.foreground }]}>
+            分组
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => onShowCredential(item)}
+          style={({ pressed }) => [
+            styles.addressCompactAction,
+            {
+              backgroundColor: `${colors.primary}12`,
+              borderColor: `${colors.primary}22`,
+              opacity: pressed ? 0.72 : 1,
+            },
+          ]}
+        >
+          <Text style={[styles.addressCompactActionText, { color: colors.primary }]}>
+            凭证
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => onClearInbox(item)}
+          style={({ pressed }) => [
+            styles.addressCompactAction,
+            {
+              backgroundColor: colors.background,
+              borderColor: colors.border,
+              opacity: pressed ? 0.72 : 1,
+            },
+          ]}
+        >
+          <Text style={[styles.addressCompactActionText, { color: colors.foreground }]}>
+            清空收件
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => onDelete(item)}
+          style={({ pressed }) => [
+            styles.addressCompactDangerAction,
+            {
+              backgroundColor: `${colors.error}10`,
+              opacity: pressed ? 0.72 : 1,
+            },
+          ]}
+        >
+          <Text style={[styles.addressCompactActionText, { color: colors.error }]}>
+            删除
+          </Text>
+        </Pressable>
+      </View>
+    </Pressable>
+  );
+});
+
+const MailListItem = React.memo(function MailListItem({
+  item,
+  kind,
+  colors,
+  searchQuery,
+  metaQuery,
+  highlightStyle,
+  createdUnknownAddresses,
+  creatingAddress,
+  onOpen,
+  onDelete,
+  onCopyCode,
+  onCreateAddressFromUnknown,
+}: {
+  item: ParsedMail;
+  kind: "inbox" | "sendbox" | "unknown";
+  colors: AdminPalette;
+  searchQuery: string;
+  metaQuery: string;
+  highlightStyle: StyleProp<TextStyle>;
+  createdUnknownAddresses: Record<string, true>;
+  creatingAddress: string | null;
+  onOpen: (mail: ParsedMail) => void;
+  onDelete: (mail: ParsedMail) => void;
+  onCopyCode: (code: string) => void;
+  onCreateAddressFromUnknown: (mail: ParsedMail) => void;
+}) {
+  const preview = useMemo(() => getMailPreview(item, 68) || "(无内容)", [item]);
+  const code = useMemo(() => getVerificationCode(item), [item]);
+  const senderAddress = item.from?.address || item.ownerAddress || "—";
+  const senderLabel = item.from?.name || getSenderDisplay(item);
+  const recipientAddress =
+    item.to?.[0]?.address || getMailRecipientsDisplay(item) || "—";
+  const recipientLabel = item.to?.[0]?.name || "";
+  const primaryAddress = kind === "sendbox" ? recipientAddress : senderAddress;
+  const primaryLabel = kind === "sendbox" ? recipientLabel : senderLabel;
+  const managedAddress = getManagedAddressForMail(item, kind);
+  const unknownRecipientAddress =
+    managedAddress || item.ownerAddress || recipientAddress || "—";
+  const createdUnknownKey = normalizeGroupAddress(unknownRecipientAddress);
+  const isUnknownCreated =
+    kind === "unknown" && !!createdUnknownAddresses[createdUnknownKey];
+  const canCreateUnknownAddress = !!splitMailboxAddress(unknownRecipientAddress);
+  const showUnknownCreate = kind === "unknown";
+  const formattedDate = formatMailDate(item.date || item.createdAt);
+  const tertiaryMeta =
+    kind === "sendbox"
+      ? `发件 ${
+          formatMailboxDisplay(item.from, { addressFirst: true }) ||
+          item.ownerAddress ||
+          "—"
+        } · ${formattedDate}`
+      : kind === "unknown"
+        ? `收件 ${unknownRecipientAddress} · ${formattedDate}`
+        : item.ownerAddress
+          ? `收件 ${item.ownerAddress} · ${formattedDate}`
+          : formattedDate;
+
+  return (
+    <Pressable
+      onPress={() => onOpen(item)}
+      onLongPress={() => onDelete(item)}
+      delayLongPress={400}
+      style={({ pressed }) => [
+        styles.compactMailItem,
+        {
+          backgroundColor: colors.surface,
+          borderBottomColor: colors.border,
+          opacity: pressed ? 0.7 : 1,
+        },
+      ]}
+    >
+      <View style={styles.compactMailTop}>
+        <View style={styles.compactMailTitleWrap}>
+          <HighlightText
+            text={item.subject || "(无主题)"}
+            query={searchQuery}
+            style={[styles.compactMailSubject, { color: colors.foreground }]}
+            highlightStyle={highlightStyle}
+            numberOfLines={1}
+          />
+          <HighlightText
+            text={`${primaryAddress}${
+              primaryLabel && primaryLabel !== primaryAddress ? ` · ${primaryLabel}` : ""
+            }`}
+            query={searchQuery}
+            style={[styles.compactMailSender, { color: colors.muted }]}
+            highlightStyle={highlightStyle}
+            numberOfLines={1}
+          />
+          <HighlightText
+            text={preview}
+            query={searchQuery}
+            style={[styles.compactMailPreview, { color: colors.muted }]}
+            highlightStyle={highlightStyle}
+            numberOfLines={1}
+          />
+          <View style={styles.mailCardFooterRow}>
+            <View style={styles.mailCardFooterMeta}>
+              <HighlightText
+                text={tertiaryMeta}
+                query={metaQuery}
+                style={[styles.adminMetaText, { color: colors.muted }]}
+                highlightStyle={highlightStyle}
+                numberOfLines={1}
+              />
+            </View>
+          </View>
+        </View>
+        <View style={styles.compactMailAside}>
+          <Text
+            style={[styles.mailDate, styles.compactMailDate, { color: colors.muted }]}
+            numberOfLines={1}
+          >
+            {formattedDate}
+          </Text>
+          {code ? (
+            <Pressable
+              onPress={() => onCopyCode(code)}
+              style={({ pressed }) => [
+                styles.compactCodePill,
+                {
+                  backgroundColor: `${colors.primary}12`,
+                  borderColor: `${colors.primary}2A`,
+                  opacity: pressed ? 0.7 : 1,
+                },
+              ]}
+            >
+              <HighlightText
+                text={code}
+                query={searchQuery}
+                style={[styles.compactCodePillText, { color: colors.primary }]}
+                highlightStyle={highlightStyle}
+                numberOfLines={1}
+              />
+            </Pressable>
+          ) : null}
+          {showUnknownCreate ? (
+            <Pressable
+              onPress={() => onCreateAddressFromUnknown(item)}
+              disabled={
+                isUnknownCreated ||
+                creatingAddress === managedAddress ||
+                !canCreateUnknownAddress
+              }
+              style={({ pressed }) => [
+                styles.compactAsideAction,
+                {
+                  backgroundColor: isUnknownCreated
+                    ? `${colors.success}10`
+                    : `${colors.primary}10`,
+                  borderColor: isUnknownCreated
+                    ? `${colors.success}28`
+                    : `${colors.primary}26`,
+                  opacity:
+                    isUnknownCreated ||
+                    creatingAddress === managedAddress ||
+                    !canCreateUnknownAddress ||
+                    pressed
+                      ? 0.74
+                      : 1,
+                },
+              ]}
+            >
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.compactAsideActionText,
+                  { color: isUnknownCreated ? colors.success : colors.primary },
+                ]}
+              >
+                {isUnknownCreated
+                  ? "已创建"
+                  : creatingAddress === managedAddress
+                    ? "创建中"
+                    : "创建"}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
+    </Pressable>
+  );
+});
+
 function SendAsPanel({ colors }: { colors: ReturnType<typeof useColors> }) {
   const [fromAddress, setFromAddress] = useState("");
   const [fromName, setFromName] = useState("");
@@ -3620,6 +4171,11 @@ function AdminMetricTile({
   );
 }
 
+const MemoStatsPanel = React.memo(StatsPanel);
+const MemoAddressesPanel = React.memo(AddressesPanel);
+const MemoMailsPanel = React.memo(MailsPanel);
+const MemoSendAsPanel = React.memo(SendAsPanel);
+
 function PanelStateCard({
   colors,
   title,
@@ -3868,6 +4424,19 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
   },
+  headerIconButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  headerIconText: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
   headerThemeText: {
     fontSize: 12,
     fontWeight: "700",
@@ -3922,6 +4491,19 @@ const styles = StyleSheet.create({
     bottom: ADMIN_SEGMENT_PADDING,
     left: 0,
     borderRadius: 8,
+    overflow: "hidden",
+    zIndex: 2,
+  },
+  segmentOverlayTrack: {
+    flexDirection: "row",
+    gap: ADMIN_SEGMENT_GAP,
+    paddingHorizontal: ADMIN_SEGMENT_PADDING,
+  },
+  segmentOverlayItem: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+    paddingVertical: 6,
   },
   segmentItem: {
     paddingHorizontal: 6,
@@ -3937,6 +4519,9 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
+  segmentTextActive: {
+    color: "#FFFFFF",
+  },
   centerAll: {
     flex: 1,
     alignItems: "center",
@@ -3945,15 +4530,18 @@ const styles = StyleSheet.create({
   },
   adminPagerWrap: {
     flex: 1,
+    overflow: "hidden",
   },
-  adminPager: {
+  adminPagerTrack: {
     flex: 1,
+    flexDirection: "row",
   },
   adminPagerPage: {
     flex: 1,
+    flexShrink: 0,
   },
   adminPagerHiddenPage: {
-    display: "none",
+    opacity: 0,
   },
   adminPagerPlaceholder: {
     flex: 1,
@@ -4392,6 +4980,9 @@ const styles = StyleSheet.create({
   },
   addressListEmpty: {
     flexGrow: 1,
+  },
+  addressItemSeparator: {
+    height: 10,
   },
   addressCard: {
     borderWidth: 1,

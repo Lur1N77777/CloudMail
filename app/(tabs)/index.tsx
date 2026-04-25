@@ -12,6 +12,7 @@ import {
 import { useRouter } from "expo-router";
 
 import { ScreenContainer } from "@/components/screen-container";
+import { TabSwipeScreen } from "@/components/tab-swipe-screen";
 import { Toast } from "@/components/toast";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
@@ -190,36 +191,40 @@ export default function InboxScreen() {
   // Not configured state
   if (!state.isConfigured && state.isInitialized) {
     return (
-      <ScreenContainer>
-        <View style={styles.emptyContainer}>
-          <IconSymbol name="gearshape.fill" size={56} color={colors.muted} />
-          <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
-            欢迎使用 CloudMail
-          </Text>
-          <Text style={[styles.emptySubtitle, { color: colors.muted }]}>
-            请先在「设置」中配置 Worker 地址
-          </Text>
-        </View>
-        <Toast message={state.error} type="error" onDismiss={clearError} />
-      </ScreenContainer>
+      <TabSwipeScreen tab="inbox">
+        <ScreenContainer>
+          <View style={styles.emptyContainer}>
+            <IconSymbol name="gearshape.fill" size={56} color={colors.muted} />
+            <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
+              欢迎使用 CloudMail
+            </Text>
+            <Text style={[styles.emptySubtitle, { color: colors.muted }]}>
+              请先在「设置」中配置 Worker 地址
+            </Text>
+          </View>
+          <Toast message={state.error} type="error" onDismiss={clearError} />
+        </ScreenContainer>
+      </TabSwipeScreen>
     );
   }
 
   // No active account
   if (!activeAccount && state.isInitialized) {
     return (
-      <ScreenContainer>
-        <View style={styles.emptyContainer}>
-          <IconSymbol name="at" size={56} color={colors.muted} />
-          <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
-            暂无邮箱
-          </Text>
-          <Text style={[styles.emptySubtitle, { color: colors.muted }]}>
-            请在「邮箱」中创建一个邮箱地址
-          </Text>
-        </View>
-        <Toast message={state.error} type="error" onDismiss={clearError} />
-      </ScreenContainer>
+      <TabSwipeScreen tab="inbox">
+        <ScreenContainer>
+          <View style={styles.emptyContainer}>
+            <IconSymbol name="at" size={56} color={colors.muted} />
+            <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
+              暂无邮箱
+            </Text>
+            <Text style={[styles.emptySubtitle, { color: colors.muted }]}>
+              请在「邮箱」中创建一个邮箱地址
+            </Text>
+          </View>
+          <Toast message={state.error} type="error" onDismiss={clearError} />
+        </ScreenContainer>
+      </TabSwipeScreen>
     );
   }
 
@@ -227,7 +232,8 @@ export default function InboxScreen() {
   const isLoading = tab === "inbox" ? state.isLoadingMails : state.isLoadingSent;
 
   return (
-    <ScreenContainer>
+    <TabSwipeScreen tab="inbox">
+      <ScreenContainer>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
         <View style={styles.headerLeft}>
@@ -352,7 +358,8 @@ export default function InboxScreen() {
         type="success"
         onDismiss={clearSuccess}
       />
-    </ScreenContainer>
+      </ScreenContainer>
+    </TabSwipeScreen>
   );
 }
 

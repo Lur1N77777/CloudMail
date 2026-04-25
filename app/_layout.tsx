@@ -19,6 +19,7 @@ import type { EdgeInsets, Metrics, Rect } from "react-native-safe-area-context";
 import { trpc, createTRPCClient } from "@/lib/trpc";
 import { initManusRuntime, subscribeSafeAreaInsets } from "@/lib/_core/manus-runtime";
 import { MailProvider } from "@/lib/mail-context";
+import { SchemeColors } from "@/constants/theme";
 
 const DEFAULT_WEB_INSETS: EdgeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 const DEFAULT_WEB_FRAME: Rect = { x: 0, y: 0, width: 0, height: 0 };
@@ -29,7 +30,7 @@ export const unstable_settings = {
 
 function ThemedStatusBar() {
   const { colorScheme } = useThemeContext();
-  return <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />;
+  return <StatusBar style={colorScheme !== "light" ? "light" : "dark"} />;
 }
 
 function AppStack() {
@@ -43,11 +44,12 @@ function AppStack() {
         animationMatchesGesture: true,
         fullScreenGestureEnabled: true,
         contentStyle: {
-          backgroundColor: colorScheme === "dark" ? "#0F172A" : "#F8FAFC",
+          backgroundColor: SchemeColors[colorScheme].background,
         },
       }}
     >
       <Stack.Screen name="(tabs)" options={{ animation: "none" }} />
+      <Stack.Screen name="settings" />
       <Stack.Screen name="mail-detail" />
       <Stack.Screen name="admin-address-detail" />
       <Stack.Screen name="admin-mail-detail" />

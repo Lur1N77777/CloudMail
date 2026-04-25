@@ -2,7 +2,7 @@ import { Platform } from "react-native";
 
 import themeConfig from "@/theme.config";
 
-export type ColorScheme = "light" | "dark";
+export type ColorScheme = "light" | "dark" | "oled";
 
 export const ThemeColors = themeConfig.themeColors;
 
@@ -15,12 +15,14 @@ function buildSchemePalette(colors: ThemeColorTokens): SchemePalette {
   const palette: SchemePalette = {
     light: {} as SchemePalette["light"],
     dark: {} as SchemePalette["dark"],
+    oled: {} as SchemePalette["oled"],
   };
 
   (Object.keys(colors) as ThemeColorName[]).forEach((name) => {
     const swatch = colors[name];
     palette.light[name] = swatch.light;
     palette.dark[name] = swatch.dark;
+    palette.oled[name] = swatch.oled;
   });
 
   return palette;
@@ -55,6 +57,7 @@ function buildRuntimePalette(scheme: ColorScheme): RuntimePalette {
 export const Colors = {
   light: buildRuntimePalette("light"),
   dark: buildRuntimePalette("dark"),
+  oled: buildRuntimePalette("oled"),
 } satisfies Record<ColorScheme, RuntimePalette>;
 
 export type ThemeColorPalette = (typeof Colors)[ColorScheme];

@@ -14,6 +14,7 @@ import {
 import { Pressable } from "react-native";
 
 import { ScreenContainer } from "@/components/screen-container";
+import { TabSwipeScreen } from "@/components/tab-swipe-screen";
 import { Toast } from "@/components/toast";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
@@ -296,22 +297,25 @@ export default function AddressesScreen() {
 
   if (!state.isConfigured) {
     return (
-      <ScreenContainer>
-        <View style={styles.emptyContainer}>
-          <IconSymbol name="gearshape.fill" size={56} color={colors.muted} />
-          <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
-            请先配置服务器
-          </Text>
-          <Text style={[styles.emptySubtitle, { color: colors.muted }]}>
-            在「设置」中填入 Worker 地址
-          </Text>
-        </View>
-      </ScreenContainer>
+      <TabSwipeScreen tab="addresses">
+        <ScreenContainer>
+          <View style={styles.emptyContainer}>
+            <IconSymbol name="gearshape.fill" size={56} color={colors.muted} />
+            <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
+              请先配置服务器
+            </Text>
+            <Text style={[styles.emptySubtitle, { color: colors.muted }]}>
+              在「设置」中填入 Worker 地址
+            </Text>
+          </View>
+        </ScreenContainer>
+      </TabSwipeScreen>
     );
   }
 
   return (
-    <ScreenContainer>
+    <TabSwipeScreen tab="addresses">
+      <ScreenContainer>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
         <Text style={[styles.headerTitle, { color: colors.foreground }]}>
@@ -896,7 +900,8 @@ export default function AddressesScreen() {
 
       <Toast message={state.error} type="error" onDismiss={clearError} />
       <Toast message={state.successMessage} type="success" onDismiss={clearSuccess} />
-    </ScreenContainer>
+      </ScreenContainer>
+    </TabSwipeScreen>
   );
 }
 

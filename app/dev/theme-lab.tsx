@@ -51,15 +51,26 @@ export default function ThemeLabScreen() {
     return {
       light: build("light"),
       dark: build("dark"),
-    };
+      oled: build("oled"),
+    } satisfies Record<ColorScheme, ReturnType<typeof build>>;
   }, []);
+
+  const schemeLabels = useMemo(
+    () =>
+      ({
+        light: "Light preview",
+        dark: "Dark preview",
+        oled: "OLED preview",
+      }) satisfies Record<ColorScheme, string>,
+    []
+  );
 
   return (
     <ScreenContainer className="p-5">
       <ScrollView className="flex-1">
         <View className="gap-4 pb-8">
           <View className="flex-row gap-2">
-            {(["light", "dark"] as ColorScheme[]).map((scheme) => (
+            {(["light", "dark", "oled"] as ColorScheme[]).map((scheme) => (
               <Pressable
                 key={scheme}
                 style={[
@@ -91,7 +102,7 @@ export default function ThemeLabScreen() {
                     },
                   ]}
                 >
-                  {scheme === "light" ? "Light preview" : "Dark preview"}
+                  {schemeLabels[scheme]}
                 </Text>
                 <Text
                   style={[

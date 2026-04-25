@@ -4,6 +4,7 @@ import { WebView } from "react-native-webview";
 
 import { useColors } from "@/hooks/use-colors";
 import { useColorScheme } from "@/hooks/use-color-scheme";
+import { SchemeColors, type ColorScheme } from "@/constants/theme";
 import type { ParsedMail } from "@/lib/api";
 import { getMailBodyText, sanitizeMailHtml } from "@/lib/mail-parser";
 
@@ -123,16 +124,18 @@ function formatHtmlSource(value: string): string {
   return normalized.replace(/>\s+</g, ">\n<");
 }
 
-function buildMailDocument(html: string, isDark: boolean, zoom: number) {
-  const bodyColor = isDark ? "#F8FAFC" : "#0F172A";
-  const mutedColor = isDark ? "#CBD5E1" : "#475569";
-  const linkColor = isDark ? "#60A5FA" : "#2563EB";
+function buildMailDocument(html: string, scheme: ColorScheme, zoom: number) {
+  const palette = SchemeColors[scheme];
+  const isDarkSurface = scheme !== "light";
+  const bodyColor = palette.foreground;
+  const mutedColor = palette.muted;
+  const linkColor = palette.primary;
   const backgroundColor = "transparent";
   const styleBlock = `
     <meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=5,user-scalable=yes,viewport-fit=cover" />
     <style>
       :root {
-        color-scheme: ${isDark ? "dark" : "light"};
+        color-scheme: ${isDarkSurface ? "dark" : "light"};
         --mail-text-scale: ${zoom}%;
       }
       html {
@@ -217,7 +220,7 @@ function buildMailDocument(html: string, isDark: boolean, zoom: number) {
       }
       hr {
         border: 0;
-        border-top: 1px solid ${isDark ? "#334155" : "#CBD5E1"};
+        border-top: 1px solid ${palette.border};
         margin: 16px 0;
       }
     </style>
@@ -268,7 +271,7 @@ export function MailBodyView({
   }, [hasHtml, mail.id]);
 
   const htmlDocument = useMemo(
-    () => buildMailDocument(htmlBody, colorScheme === "dark", htmlZoom),
+    () => buildMailDocument(htmlBody, colorScheme, htmlZoom),
     [colorScheme, htmlBody, htmlZoom]
   );
 
