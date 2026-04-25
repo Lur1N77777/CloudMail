@@ -36,7 +36,14 @@ The mailbox backend/API compatibility comes from [dreamhunter2333/cloudflare_tem
 
 ## Screenshots
 
-Screenshots will be added as the public UI stabilizes. For now, check the release APK to try the current mobile experience.
+Click any thumbnail to open the full-size image.
+
+| Preview | Description |
+| --- | --- |
+| <a href="./docs/screenshots/admin-dashboard.jpg"><img src="./docs/screenshots/admin-dashboard.jpg" width="220" alt="Admin dashboard" /></a> | **Admin dashboard** — a compact overview of managed addresses, matched inbox mail, sent mail, and unknown-recipient messages, with quick refresh and tab navigation. |
+| <a href="./docs/screenshots/compose-mail.jpg"><img src="./docs/screenshots/compose-mail.jpg" width="220" alt="Compose mail screen" /></a> | **Compose mail** — send email from a selected mailbox identity, with sender, recipient, subject, and content fields organized for mobile use. |
+| <a href="./docs/screenshots/settings-server.jpg"><img src="./docs/screenshots/settings-server.jpg" width="220" alt="Server settings" /></a> | **Server settings** — configure the Cloudflare Worker endpoint, optional admin password, site password, and auto-refresh interval. |
+| <a href="./docs/screenshots/settings-appearance.jpg"><img src="./docs/screenshots/settings-appearance.jpg" width="220" alt="Appearance settings" /></a> | **Appearance and app settings** — switch refresh intervals and theme mode, then test the connection or check the current app version. |
 
 ## Download
 

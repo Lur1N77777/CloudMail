@@ -36,7 +36,14 @@ CloudMail 的邮箱后端/API 兼容能力来自 [dreamhunter2333/cloudflare_tem
 
 ## 截图
 
-截图会在公开 UI 稳定后补充。你可以先下载 Release 里的 APK 体验当前版本。
+点击缩略图可以打开原图查看。
+
+| 预览 | 说明 |
+| --- | --- |
+| <a href="./docs/screenshots/admin-dashboard.jpg"><img src="./docs/screenshots/admin-dashboard.jpg" width="220" alt="管理员统计面板" /></a> | **管理员统计面板**：集中展示可管理地址、已匹配收件、系统发件和未知地址收件数量，支持刷新和顶部标签切换。 |
+| <a href="./docs/screenshots/compose-mail.jpg"><img src="./docs/screenshots/compose-mail.jpg" width="220" alt="发件界面" /></a> | **发件界面**：从指定邮箱身份发信，按移动端表单排布发件人、收件人、主题和内容。 |
+| <a href="./docs/screenshots/settings-server.jpg"><img src="./docs/screenshots/settings-server.jpg" width="220" alt="服务器配置" /></a> | **服务器配置**：填写 Cloudflare Worker 地址、管理员密码、站点密码，并设置自动刷新间隔。 |
+| <a href="./docs/screenshots/settings-appearance.jpg"><img src="./docs/screenshots/settings-appearance.jpg" width="220" alt="外观与应用设置" /></a> | **外观与应用设置**：切换刷新间隔和主题模式，支持测试连接并查看当前版本信息。 |
 
 ## 下载
 
