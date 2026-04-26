@@ -1,16 +1,18 @@
-# Security Policy
+# 安全策略
 
-## Reporting a vulnerability
+## 报告安全问题
 
-Please do not report security issues in a public GitHub issue.
+请不要在公开 GitHub issue 里披露安全问题。
 
-Send a private report to the project maintainer through your preferred private contact channel. Include:
+如果你发现安全漏洞，请通过私密联系方式联系项目维护者，并尽量提供：
 
-- A short description of the issue.
-- Steps to reproduce it.
-- Affected versions or commits, if known.
-- Any logs or screenshots with secrets removed.
+- 问题的简短说明。
+- 可复现步骤。
+- 受影响的版本或提交。
+- 已经去除敏感信息的日志或截图。
 
-## Handling sensitive data
+## 处理敏感数据
 
-Do not share real mailbox credentials, admin passwords, JWTs, API keys, database URLs, or private service URLs in public issues, pull requests, screenshots, or logs.
+不要在公开 issue、PR、截图、日志或聊天记录中分享真实的邮箱凭证、管理员密码、JWT、API key、数据库地址、私有 Worker 地址或其他敏感信息。
+
+CloudMail 是连接自建 Cloudflare 临时邮箱服务的移动端客户端。排查问题时，请优先使用脱敏后的测试环境、测试邮箱地址和测试凭证。

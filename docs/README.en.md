@@ -3,7 +3,7 @@
 
 # CloudMail
 
-**V1.0.12 · Admin-first mobile client for Cloudflare temporary mailbox systems**
+**V1.0.12 · Mobile admin app for Cloudflare Temp Email systems**
 
 [![CI](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml/badge.svg)](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
@@ -19,9 +19,11 @@
 
 ## What CloudMail is
 
-CloudMail is a React Native / Expo mobile app for managing temporary mailbox services from an administrator-first interface. It targets mailbox systems compatible with [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email).
+CloudMail is a mobile admin app for **Cloudflare Temp Email** systems. It is built with React Native / Expo and targets [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) and compatible APIs.
 
-CloudMail now opens directly into administrator setup or the admin console. The old public-user welcome flow is no longer the main entry point. The app is built for managing addresses, inbox mail, sent mail, unknown-recipient mail, verification codes, local groups, and HTML email from a phone.
+The upstream project provides the Cloudflare Worker mailbox backend and web experience. CloudMail adds an Android admin client around that ecosystem, with address management, inbox mail, sent mail, unknown-recipient mail, verification codes, local groups, and HTML email reading from a phone.
+
+CloudMail now opens directly into administrator setup or the admin console. The old public-user welcome flow is no longer the main entry point.
 
 ## What's new in V1.0.12
 
@@ -35,6 +37,7 @@ CloudMail now opens directly into administrator setup or the admin console. The 
 
 ## Highlights
 
+- **Cloudflare Temp Email mobile admin app**: connect to your `cloudflare_temp_email` compatible Worker/API and manage your mailbox system from a phone.
 - **Admin console**: manage statistics, addresses, inbox mail, sent mail, unknown-recipient mail, and sending from one place.
 - **Address management**: create custom addresses, random addresses, and subdomain addresses; view credentials, clear inboxes, and delete addresses.
 - **Inbox, sent mail, and unknown recipients**: browse normal mail, sent mail, and mail received by uncreated addresses; create unknown addresses with one tap.
@@ -67,7 +70,7 @@ APK files are intentionally not committed to the source repository. This keeps t
 
 ### 1. Prepare your mailbox service
 
-CloudMail needs a deployed `cloudflare_temp_email` compatible service. Prepare these values first:
+CloudMail needs a deployed `cloudflare_temp_email` compatible service, meaning your Cloudflare temporary mailbox Worker/API. Prepare these values first:
 
 - **Worker URL**: for example, `https://your-worker.example.com`.
 - **Admin password**: used to enter the admin console.
@@ -176,9 +179,9 @@ The generated APK should be uploaded to GitHub Releases instead of committed to 
 
 ## Upstream mailbox system
 
-CloudMail is designed for mailbox systems compatible with [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email).
+CloudMail is built around the [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) Cloudflare Temp Email ecosystem.
 
-Credit goes to [dreamhunter2333](https://github.com/dreamhunter2333) and contributors of the upstream project for the Cloudflare temporary email system and API behavior that this app targets.
+Credit goes to [dreamhunter2333](https://github.com/dreamhunter2333) and contributors of the upstream project for the mailbox backend, web admin experience, and API behavior that this app targets.
 
 See [NOTICE](./NOTICE.md) for attribution details.
 
