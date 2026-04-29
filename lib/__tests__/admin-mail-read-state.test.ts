@@ -5,6 +5,7 @@ import {
   __resetAdminMailReadStateForTests,
   buildAdminMailReadKey,
   loadAdminMailUnreadKeySet,
+  markAllAdminMailsRead,
   markAdminMailRead,
   reconcileAdminMailReadState,
   subscribeAdminMailReadState,
@@ -118,6 +119,32 @@ describe("admin mail read state", () => {
 
     const unread = await loadAdminMailUnreadKeySet(workerUrl);
     expect(unread.has(buildAdminMailReadKey(newMail))).toBe(false);
+  });
+
+  it("clears all unread state for the current worker", async () => {
+    const workerUrl = "https://worker.example.com";
+    const oldMail = makeMail();
+    const newMail = makeMail({
+      id: 2,
+      messageId: "message-2@example.com",
+      createdAt: "2026-04-25T10:01:00.000Z",
+      date: "2026-04-25T10:01:00.000Z",
+    });
+
+    await reconcileAdminMailReadState({
+      workerUrl,
+      viewKey: "admin:inbox",
+      mails: [oldMail],
+    });
+    await reconcileAdminMailReadState({
+      workerUrl,
+      viewKey: "admin:inbox",
+      mails: [newMail, oldMail],
+    });
+    await markAllAdminMailsRead(workerUrl);
+
+    const unread = await loadAdminMailUnreadKeySet(workerUrl);
+    expect(unread.size).toBe(0);
   });
 
   it("syncs read state between inbox and unknown copies of the same mail", async () => {

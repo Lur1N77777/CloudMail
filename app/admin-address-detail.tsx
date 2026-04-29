@@ -13,11 +13,22 @@ import {
   Text,
   TextInput,
   View,
+  type GestureResponderEvent,
 } from "react-native";
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 
 import { ScreenContainer } from "@/components/screen-container";
 import { SwipeableScreen, SwipeSuspendView } from "@/components/swipeable-screen";
+import {
+  FloatingActionMenu,
+  type FloatingActionMenuAnchor,
+  type FloatingActionMenuItem,
+} from "@/components/floating-action-menu";
 import { MiniToast } from "@/components/mini-toast";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
@@ -42,6 +53,13 @@ import {
   reconcileAdminMailReadState,
   subscribeAdminMailReadState,
 } from "@/lib/admin-mail-read-state";
+import {
+  blockAdminMailSender,
+  getAdminMailSpamSender,
+  isAdminMailSpamBySenderSet,
+  loadAdminMailSpamSenderSet,
+  subscribeAdminMailSpamState,
+} from "@/lib/admin-mail-spam-state";
 import { mergeMailLists } from "@/lib/mail-list-utils";
 import {
   formatMailDate,
@@ -56,6 +74,8 @@ import {
 type AddressDetailTab = "inbox" | "sent" | "send";
 
 const PAGE_SIZE = 30;
+const ADDRESS_SEGMENT_PADDING = 4;
+const ADDRESS_SEGMENT_ANIMATION_MS = 96;
 const ADDRESS_DETAIL_TABS: { key: AddressDetailTab; label: string }[] = [
   { key: "inbox", label: "收件箱" },
   { key: "sent", label: "发件箱" },
@@ -70,10 +90,31 @@ export default function AdminAddressDetailScreen() {
   const addressId = typeof params.addressId === "string" ? params.addressId : "";
   const [tab, setTab] = useState<AddressDetailTab>("inbox");
   const [miniToastMessage, setMiniToastMessage] = useState<string | null>(null);
+  const [segmentTrackWidth, setSegmentTrackWidth] = useState(0);
+  const segmentProgress = useSharedValue(0);
   const activeTabIndex = useMemo(
     () => ADDRESS_DETAIL_TABS.findIndex((item) => item.key === tab),
     [tab]
   );
+  const segmentItemWidth =
+    segmentTrackWidth > 0
+      ? (segmentTrackWidth - ADDRESS_SEGMENT_PADDING * 2) / ADDRESS_DETAIL_TABS.length
+      : 0;
+  const segmentIndicatorStyle = useAnimatedStyle(() => ({
+    width: segmentItemWidth,
+    transform: [
+      {
+        translateX:
+          ADDRESS_SEGMENT_PADDING + segmentProgress.value * segmentItemWidth,
+      },
+    ],
+  }));
+
+  useEffect(() => {
+    segmentProgress.value = withTiming(activeTabIndex, {
+      duration: ADDRESS_SEGMENT_ANIMATION_MS,
+    });
+  }, [activeTabIndex, segmentProgress]);
 
   const selectAdjacentTab = useCallback(
     (direction: -1 | 1) => {
@@ -173,19 +214,27 @@ export default function AdminAddressDetailScreen() {
 
       <View style={styles.segmentWrap}>
         <View
+          onLayout={(event) => setSegmentTrackWidth(event.nativeEvent.layout.width)}
           style={[
             styles.segmentTrack,
             { backgroundColor: colors.surface, borderColor: colors.border },
           ]}
         >
+          {segmentItemWidth > 0 ? (
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.segmentIndicator,
+                { backgroundColor: colors.primary },
+                segmentIndicatorStyle,
+              ]}
+            />
+          ) : null}
           {ADDRESS_DETAIL_TABS.map(({ key, label }) => (
             <Pressable
               key={key}
               onPress={() => setTab(key)}
-              style={[
-                styles.segmentItem,
-                { backgroundColor: tab === key ? colors.primary : "transparent" },
-              ]}
+              style={styles.segmentItem}
             >
               <Text
                 style={[
@@ -264,8 +313,14 @@ function AddressMailList({
   const [offset, setOffset] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [unreadMailKeys, setUnreadMailKeys] = useState<Set<string>>(new Set());
+  const [blockedSenders, setBlockedSenders] = useState<Set<string>>(new Set());
+  const [mailActionMenu, setMailActionMenu] = useState<{
+    anchor: FloatingActionMenuAnchor;
+    items: FloatingActionMenuItem[];
+  } | null>(null);
   const dataRef = useRef<ParsedMail[]>([]);
   const offsetRef = useRef(0);
+  const listRootRef = useRef<React.ElementRef<typeof View>>(null);
   const readStateScope = mailState.workerUrl;
   const readStateViewKey = useMemo(
     () => `admin-address:${address.trim().toLowerCase()}:inbox`,
@@ -298,6 +353,32 @@ function AddressMailList({
     const unsubscribe = subscribeAdminMailReadState((event) => {
       if (event.workerUrl !== readStateScope) return;
       setUnreadMailKeys(new Set(event.unreadKeys));
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [kind, readStateScope]);
+
+  useEffect(() => {
+    if (kind !== "inbox" || !readStateScope.trim()) {
+      setBlockedSenders(new Set());
+      return;
+    }
+
+    let isMounted = true;
+    const refresh = async () => {
+      const nextBlockedSenders = await loadAdminMailSpamSenderSet(readStateScope);
+      if (isMounted) {
+        setBlockedSenders(nextBlockedSenders);
+      }
+    };
+
+    void refresh();
+    const unsubscribe = subscribeAdminMailSpamState((event) => {
+      if (event.workerUrl !== readStateScope) return;
+      setBlockedSenders(new Set(event.blockedSenders));
     });
 
     return () => {
@@ -475,14 +556,120 @@ function AddressMailList({
     [markMailReadLocally, onMiniToast]
   );
 
+  const handleBlockSender = useCallback(
+    (mail: ParsedMail) => {
+      const sender = getAdminMailSpamSender(mail);
+      if (kind !== "inbox" || !sender || !readStateScope.trim()) {
+        Alert.alert("无法拒收", "这封邮件没有可识别的发件邮箱地址。");
+        return;
+      }
+
+      Alert.alert("拒收发件人", `以后来自 ${sender} 的邮件会进入垃圾信箱。`, [
+        { text: "取消", style: "cancel" },
+        {
+          text: "拒收",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await blockAdminMailSender(readStateScope, mail);
+              markMailReadLocally(mail);
+              onMiniToast("已加入垃圾信箱");
+            } catch (err: any) {
+              Alert.alert("操作失败", err?.message || "拒收失败");
+            }
+          },
+        },
+      ]);
+    },
+    [kind, markMailReadLocally, onMiniToast, readStateScope]
+  );
+
+  const closeMailActionMenu = useCallback(() => {
+    setMailActionMenu(null);
+  }, []);
+
+  const openMailActionMenu = useCallback(
+    (event: GestureResponderEvent, items: FloatingActionMenuItem[]) => {
+      const pageX = event.nativeEvent.pageX;
+      const pageY = event.nativeEvent.pageY;
+      const rootNode = listRootRef.current;
+
+      if (!rootNode) {
+        setMailActionMenu({ anchor: { x: pageX, y: pageY }, items });
+        return;
+      }
+
+      rootNode.measureInWindow((rootX, rootY) => {
+        setMailActionMenu({
+          anchor: { x: pageX - rootX, y: pageY - rootY },
+          items,
+        });
+      });
+    },
+    []
+  );
+
+  const handleMailLongPress = useCallback(
+    (mail: ParsedMail, event: GestureResponderEvent) => {
+      if (kind !== "inbox") {
+        openMailActionMenu(event, [
+          {
+            key: "delete",
+            label: "删除邮件",
+            subtitle: "从发件箱移除",
+            icon: "trash.fill",
+            destructive: true,
+            onPress: () => handleDelete(mail),
+          },
+        ]);
+        return;
+      }
+
+      const sender = getAdminMailSpamSender(mail);
+      const items: FloatingActionMenuItem[] = [];
+
+      if (sender) {
+        items.push({
+          key: "block",
+          label: "拒收该发件人",
+          subtitle: sender,
+          icon: "xmark.circle.fill",
+          destructive: true,
+          onPress: () => handleBlockSender(mail),
+        });
+      }
+
+      items.push({
+        key: "delete",
+        label: "删除邮件",
+        subtitle: "从这个地址中移除",
+        icon: "trash.fill",
+        destructive: true,
+        onPress: () => handleDelete(mail),
+      });
+
+      openMailActionMenu(event, items);
+    },
+    [handleBlockSender, handleDelete, kind, openMailActionMenu]
+  );
+
+  const visibleData = useMemo(
+    () =>
+      kind === "inbox"
+        ? data.filter((item) => !isAdminMailSpamBySenderSet(item, blockedSenders))
+        : data,
+    [blockedSenders, data, kind]
+  );
+
   return (
-    <FlatList
-      data={data}
+    <View ref={listRootRef} collapsable={false} style={{ flex: 1 }}>
+      <FlatList
+      data={visibleData}
       keyExtractor={(item) => `${kind}-${item.id}`}
-      contentContainerStyle={data.length === 0 ? styles.listEmptyContent : undefined}
+      contentContainerStyle={visibleData.length === 0 ? styles.listEmptyContent : undefined}
       refreshControl={
         <RefreshControl
-          refreshing={isLoading && data.length > 0}
+            refreshing={isLoading && visibleData.length > 0}
           onRefresh={() => load(0)}
           tintColor={colors.primary}
           colors={[colors.primary]}
@@ -545,7 +732,7 @@ function AddressMailList({
         return (
           <Pressable
             onPress={() => handleOpenMail(item)}
-            onLongPress={() => handleDelete(item)}
+            onLongPress={(event) => handleMailLongPress(item, event)}
             delayLongPress={350}
             style={({ pressed }) => [
               styles.mailCard,
@@ -613,7 +800,15 @@ function AddressMailList({
           </Pressable>
         );
       }}
-    />
+      />
+      <FloatingActionMenu
+        visible={!!mailActionMenu}
+        anchor={mailActionMenu?.anchor ?? null}
+        colors={colors}
+        items={mailActionMenu?.items ?? []}
+        onClose={closeMailActionMenu}
+      />
+    </View>
   );
 }
 
@@ -848,7 +1043,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     borderRadius: 14,
     borderWidth: 1,
-    padding: 4,
+    padding: ADDRESS_SEGMENT_PADDING,
+    position: "relative",
+    overflow: "hidden",
+  },
+  segmentIndicator: {
+    position: "absolute",
+    top: ADDRESS_SEGMENT_PADDING,
+    bottom: ADDRESS_SEGMENT_PADDING,
+    borderRadius: 10,
   },
   segmentItem: {
     flex: 1,
@@ -856,6 +1059,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
+    zIndex: 1,
   },
   segmentText: {
     fontSize: 13,

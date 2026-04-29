@@ -23,9 +23,11 @@ import {
   InteractionManager,
   Keyboard,
 } from "react-native";
-import type { StyleProp, TextStyle } from "react-native";
+import type { GestureResponderEvent, StyleProp, TextStyle } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
+  FadeIn,
+  FadeOut,
   runOnJS,
   useAnimatedStyle,
   useDerivedValue,
@@ -50,6 +52,11 @@ import {
 } from "@/components/address-group-ui";
 import { MiniToast } from "@/components/mini-toast";
 import { Toast } from "@/components/toast";
+import {
+  FloatingActionMenu,
+  type FloatingActionMenuAnchor,
+  type FloatingActionMenuItem,
+} from "@/components/floating-action-menu";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
 import { useMail } from "@/lib/mail-context";
@@ -74,12 +81,21 @@ import {
   adminDeleteSentMail,
   adminDeleteAddress,
   adminClearInbox,
+  adminClearSentItems,
+  adminBulkExecute,
+  adminBulkPreview,
   adminSendMail,
   createAddress,
   fetchAdminStatistics,
+  fetchAdminUserAddresses,
+  fetchAdminUsers,
   adminShowAddressCredential,
+  type AdminBulkAction,
+  type AdminBulkExecuteResponse,
+  type AdminBulkPreviewResponse,
   type AdminAddress,
   type AdminStatistics,
+  type AdminUser,
   type ParsedMail,
   type RawMail,
 } from "@/lib/api";
@@ -88,10 +104,19 @@ import { setAdminMailEntry } from "@/lib/admin-mail-store";
 import {
   buildAdminMailReadKey,
   loadAdminMailUnreadKeySet,
+  markAllAdminMailsRead,
   markAdminMailRead,
   reconcileAdminMailReadState,
   subscribeAdminMailReadState,
 } from "@/lib/admin-mail-read-state";
+import {
+  blockAdminMailSender,
+  getAdminMailSpamSender,
+  isAdminMailSpamBySenderSet,
+  loadAdminMailSpamSenderSet,
+  subscribeAdminMailSpamState,
+  unblockAdminMailSender,
+} from "@/lib/admin-mail-spam-state";
 import { buildMailboxName, normalizeMailboxPrefix } from "@/lib/mailbox-name";
 import {
   parseMail,
@@ -106,8 +131,31 @@ import {
 import { mergeMailLists, sortMailsDesc } from "@/lib/mail-list-utils";
 
 type AdminTab = "stats" | "addresses" | "mails" | "sendbox" | "unknown" | "send";
+type AdminMailPanelKind = "inbox" | "sendbox" | "unknown";
+type AdminMailCacheKind = AdminMailPanelKind | "spam";
+type InboxMailboxView = "inbox" | "spam";
+type AddressListItemData = AdminAddress & { groups?: AddressGroup[] };
+type AddressIndexStatus = "idle" | "loading" | "ready" | "error";
+type AddressBulkLocalAction = "add_group" | "remove_group";
+type AddressBulkActionKind = AdminBulkAction | AddressBulkLocalAction;
+type AddressBulkModalMode = "actions" | "groupPicker" | "preview" | "executing" | "done";
+type AddressBulkFailure = { address?: string; id?: number | string; error?: string };
+type AddressBulkModalState = {
+  visible: boolean;
+  mode: AddressBulkModalMode;
+  action?: AddressBulkActionKind;
+  addresses: AddressListItemData[];
+  targetGroup?: AddressGroup;
+  preview?: AdminBulkPreviewResponse;
+  result?: AdminBulkExecuteResponse;
+  progressDone?: number;
+  failures?: AddressBulkFailure[];
+  error?: string;
+};
 
 const PAGE_SIZE = 30;
+const ADDRESS_INDEX_PAGE_SIZE = 100;
+const ADMIN_USERS_PAGE_SIZE = 100;
 const LIVE_SEARCH_DEBOUNCE = 120;
 const FULL_SEARCH_PAGE_SIZE = 100;
 const SEARCH_DATASET_TTL = 30_000;
@@ -132,8 +180,8 @@ const ADMIN_PAGER_VERTICAL_FAIL_DISTANCE = 14;
 const ADMIN_PAGER_HORIZONTAL_DOMINANCE = 1.25;
 const ADMIN_PAGER_TRIGGER_DISTANCE_RATIO = 0.22;
 const ADMIN_PAGER_TRIGGER_VELOCITY = 760;
-const ADMIN_PAGER_SETTLE_ANIMATION_MS = 150;
-const ADMIN_PAGER_TAP_ANIMATION_MS = 110;
+const ADMIN_PAGER_SETTLE_ANIMATION_MS = 132;
+const ADMIN_PAGER_TAP_ANIMATION_MS = 96;
 const ADMIN_PAGER_VELOCITY_PROJECTION_MS = 0.045;
 
 const ADMIN_PAGER_SPRING_CONFIG = {
@@ -143,6 +191,59 @@ const ADMIN_PAGER_SPRING_CONFIG = {
   overshootClamping: true,
 } as const;
 const COMPACT_HIT_SLOP = { top: 6, bottom: 6, left: 6, right: 6 };
+const ADDRESS_BULK_ACTIONS: {
+  action: AddressBulkActionKind;
+  label: string;
+  subtitle: string;
+  icon: React.ComponentProps<typeof IconSymbol>["name"];
+  destructive?: boolean;
+}[] = [
+  {
+    action: "clear_inbox",
+    label: "清空收件",
+    subtitle: "删除选中/当前范围内地址的收件邮件",
+    icon: "tray.fill",
+  },
+  {
+    action: "clear_sent",
+    label: "清空发件",
+    subtitle: "删除这些地址下的发件记录",
+    icon: "paperplane.fill",
+  },
+  {
+    action: "clear_all",
+    label: "清空全部邮件",
+    subtitle: "同时清空收件和发件",
+    icon: "envelope.open.fill",
+    destructive: true,
+  },
+  {
+    action: "delete_empty",
+    label: "删除空邮箱",
+    subtitle: "只删除当前范围中没有收发邮件的地址",
+    icon: "trash.fill",
+    destructive: true,
+  },
+  {
+    action: "add_group",
+    label: "加入分组",
+    subtitle: "把选中/当前范围地址加入本地分组",
+    icon: "plus.circle.fill",
+  },
+  {
+    action: "remove_group",
+    label: "移出分组",
+    subtitle: "从本地分组中移除这些地址",
+    icon: "xmark.circle.fill",
+  },
+  {
+    action: "delete_addresses",
+    label: "删除地址",
+    subtitle: "删除地址本身，执行前会再次确认",
+    icon: "trash.fill",
+    destructive: true,
+  },
+];
 
 function clampPagerIndexAround(value: number, center: number, radius = 1) {
   "worklet";
@@ -196,12 +297,34 @@ function buildAddressSearchFields(item: AdminAddress) {
   return [
     item.name,
     String(item.id),
+    item.user_name,
+    item.username,
+    item.user_email,
+    item.user_id !== undefined ? `用户${item.user_id}` : "",
     item.created_at,
     item.updated_at,
     String(item.mail_count ?? 0),
     String(item.send_count ?? 0),
     item.groups?.map((group) => group.name).join(" "),
   ].filter(Boolean);
+}
+
+function getAdminAddressUserId(item: AdminAddress) {
+  if (item.user_id === undefined || item.user_id === null || item.user_id === "") return "";
+  return String(item.user_id);
+}
+
+function getAdminUserDisplayName(user?: AdminUser | null) {
+  if (!user) return "未知用户";
+  return (
+    user.name ||
+    user.username ||
+    user.email ||
+    user.user_email ||
+    user.openId ||
+    user.openid ||
+    `用户 #${user.id}`
+  );
 }
 
 function buildMailSearchFields(item: ParsedMail) {
@@ -270,7 +393,7 @@ function filterAdminMailsIndexed(
 
 function getManagedAddressForMail(
   mail: ParsedMail,
-  kind: "inbox" | "sendbox" | "unknown"
+  kind: AdminMailPanelKind
 ) {
   if (kind === "sendbox") {
     return (
@@ -316,6 +439,53 @@ function isAddressAlreadyExistsError(error: unknown) {
   return /already|exists|duplicate|已存在|重复/.test(message);
 }
 
+function getAddressBulkActionLabel(action: AddressBulkActionKind) {
+  switch (action) {
+    case "add_group":
+      return "加入分组";
+    case "remove_group":
+      return "移出分组";
+    case "delete_addresses":
+      return "删除地址";
+    case "clear_inbox":
+      return "清空收件";
+    case "clear_sent":
+      return "清空发件";
+    case "clear_all":
+      return "清空全部邮件";
+    case "delete_empty":
+      return "删除空邮箱";
+    default:
+      return "批量操作";
+  }
+}
+
+function buildLocalAddressBulkPreview(
+  action: AddressBulkActionKind,
+  addresses: AddressListItemData[]
+): AdminBulkPreviewResponse {
+  const targetAddresses =
+    action === "delete_empty"
+      ? addresses.filter(
+          (item) => (item.mail_count ?? 0) <= 0 && (item.send_count ?? 0) <= 0
+        )
+      : addresses;
+
+  return {
+    address_count: targetAddresses.length,
+    mail_count: targetAddresses.reduce((sum, item) => sum + (item.mail_count ?? 0), 0),
+    send_count: targetAddresses.reduce((sum, item) => sum + (item.send_count ?? 0), 0),
+    empty_address_count: addresses.filter(
+      (item) => (item.mail_count ?? 0) <= 0 && (item.send_count ?? 0) <= 0
+    ).length,
+    sample_addresses: targetAddresses.slice(0, 5).map((item) => item.name),
+  };
+}
+
+function isServerAddressBulkAction(action: AddressBulkActionKind): action is AdminBulkAction {
+  return action !== "add_group" && action !== "remove_group";
+}
+
 type AdminMailPanelCacheEntry = {
   count: number;
   data: ParsedMail[];
@@ -350,10 +520,21 @@ function normalizeAdminMailQuery(value?: string) {
 }
 
 function buildAdminMailCacheKey(
-  kind: "inbox" | "sendbox" | "unknown",
+  kind: AdminMailCacheKind,
   address?: string
 ) {
   return `${kind}:${normalizeAdminMailQuery(address) || "*"}`;
+}
+
+function clearAdminMailCacheKinds(kinds: AdminMailCacheKind[]) {
+  for (const key of adminMailPanelCache.keys()) {
+    if (kinds.some((kind) => key.startsWith(`${kind}:`))) {
+      adminMailPanelCache.delete(key);
+    }
+  }
+  for (const kind of kinds) {
+    adminMailSearchDatasetCache.delete(kind);
+  }
 }
 
 function buildAdminParsedMailCacheKey(
@@ -371,8 +552,12 @@ function buildAdminParsedMailCacheKey(
   ].join(":");
 }
 
-function buildAdminAddressesCacheKey(query?: string) {
-  return normalizeSearchKeyword(query) || "*";
+function buildAdminAddressesCacheKey(query?: string, userId: "all" | string = "all") {
+  return `${normalizeSearchKeyword(query) || "*"}:${userId || "all"}`;
+}
+
+function clearAdminAddressesPanelCache() {
+  adminAddressesPanelCache.clear();
 }
 
 function formatAdminPanelRefreshTime(date = new Date()) {
@@ -383,7 +568,7 @@ function formatAdminPanelRefreshTime(date = new Date()) {
 }
 
 async function parseAdminMailRowsCached(
-  kind: "inbox" | "sendbox" | "unknown",
+  kind: AdminMailPanelKind,
   rows: RawMail[]
 ) {
   return Promise.all(
@@ -419,6 +604,53 @@ async function parseAdminMailRowsCached(
       }
     })
   );
+}
+
+async function fetchAdminSpamMailboxDataset(blockedSenders: Set<string>) {
+  if (blockedSenders.size === 0) {
+    return { count: 0, data: [] };
+  }
+
+  const merged = new Map<string, ParsedMail>();
+
+  const sources: {
+    kind: Extract<AdminMailPanelKind, "inbox" | "unknown">;
+    fetchPage: (offset: number) => Promise<{ results: RawMail[]; count: number }>;
+  }[] = [
+    {
+      kind: "inbox",
+      fetchPage: (offset) =>
+        fetchAdminMails({ limit: FULL_SEARCH_PAGE_SIZE, offset }),
+    },
+    {
+      kind: "unknown",
+      fetchPage: (offset) =>
+        fetchAdminUnknownMails({ limit: FULL_SEARCH_PAGE_SIZE, offset }),
+    },
+  ];
+
+  for (const source of sources) {
+    let nextOffset = 0;
+    while (true) {
+      const page = await source.fetchPage(nextOffset);
+      const parsed = await parseAdminMailRowsCached(source.kind, page.results);
+      for (const mail of parsed) {
+        if (isAdminMailSpamBySenderSet(mail, blockedSenders)) {
+          merged.set(`${source.kind}:${mail.id}`, mail);
+        }
+      }
+
+      nextOffset += page.results.length;
+      if (page.results.length === 0 || nextOffset >= page.count) {
+        break;
+      }
+    }
+  }
+
+  return {
+    count: merged.size,
+    data: sortMailsDesc(Array.from(merged.values())),
+  };
 }
 
 function splitHighlightChunks(text: string, keyword: string) {
@@ -1426,6 +1658,23 @@ function AddressesPanel({
   const [addressGroups, setAddressGroups] = useState<AddressGroup[]>([]);
   const [groupLookup, setGroupLookup] = useState<Map<string, AddressGroup[]>>(new Map());
   const [groupMemberships, setGroupMemberships] = useState<Record<string, string[]>>({});
+  const [selectedUserId, setSelectedUserId] = useState<"all" | string>("all");
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [userFetchStatus, setUserFetchStatus] = useState<"idle" | "loading" | "ready" | "unsupported" | "error">("idle");
+  const [showUserFilterMenu, setShowUserFilterMenu] = useState(false);
+  const [userFilterMenuFrame, setUserFilterMenuFrame] = useState<MailFilterMenuFrame | null>(null);
+  const [addressIndexData, setAddressIndexData] = useState<AdminAddress[]>([]);
+  const [addressIndexCount, setAddressIndexCount] = useState(0);
+  const [addressIndexLoaded, setAddressIndexLoaded] = useState(0);
+  const [addressIndexStatus, setAddressIndexStatus] = useState<AddressIndexStatus>("idle");
+  const [addressIndexError, setAddressIndexError] = useState<string | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedAddressIds, setSelectedAddressIds] = useState<Set<number>>(new Set());
+  const [bulkModal, setBulkModal] = useState<AddressBulkModalState>({
+    visible: false,
+    mode: "actions",
+    addresses: [],
+  });
   const [showCred, setShowCred] = useState<{
     address: string;
     jwt?: string;
@@ -1436,9 +1685,18 @@ function AddressesPanel({
   const hasActivatedRef = useRef(false);
   const activationRefreshAtRef = useRef(0);
   const queryRef = useRef("");
+  const selectedUserIdRef = useRef<"all" | string>("all");
   const dataRef = useRef<AdminAddress[]>([]);
   const countRef = useRef(0);
   const offsetRef = useRef(0);
+  const addressLoadRequestIdRef = useRef(0);
+  const addressRefreshingRequestIdRef = useRef(0);
+  const addressSyncingRequestIdRef = useRef(0);
+  const addressLoadingRequestIdRef = useRef(0);
+  const addressIndexDataRef = useRef<AdminAddress[]>([]);
+  const addressIndexRequestIdRef = useRef(0);
+  const addressPanelRootRef = useRef<React.ElementRef<typeof View>>(null);
+  const userFilterTriggerRef = useRef<React.ElementRef<typeof View>>(null);
   const highlightStyle = useMemo(
     () => ({
       backgroundColor: `${colors.primary}26`,
@@ -1448,22 +1706,112 @@ function AddressesPanel({
     [colors.foreground, colors.primary]
   );
   const groupScope = mailState.workerUrl;
-  const decoratedData = useMemo(
-    () =>
-      data.map((item) => ({
+  const usersById = useMemo(() => {
+    const map = new Map<string, AdminUser>();
+    for (const user of adminUsers) {
+      if (user.id !== undefined && user.id !== null) {
+        map.set(String(user.id), user);
+      }
+    }
+    return map;
+  }, [adminUsers]);
+  const inferredUsers = useMemo(() => {
+    const map = new Map<string, AdminUser>();
+    for (const item of addressIndexData.length > 0 ? addressIndexData : data) {
+      const userId = getAdminAddressUserId(item);
+      if (!userId || map.has(userId)) continue;
+      map.set(userId, {
+        id: userId,
+        name: item.user_name || item.username,
+        email: item.user_email,
+      });
+    }
+    for (const user of adminUsers) {
+      map.set(String(user.id), user);
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      getAdminUserDisplayName(a).localeCompare(getAdminUserDisplayName(b), "zh-CN")
+    );
+  }, [addressIndexData, adminUsers, data]);
+  const selectedUserLabel = useMemo(() => {
+    if (selectedUserId === "all") return "全部用户";
+    const user = usersById.get(selectedUserId);
+    return user ? getAdminUserDisplayName(user) : `用户 #${selectedUserId}`;
+  }, [selectedUserId, usersById]);
+  const decorateAddressRows = useCallback(
+    (items: AdminAddress[]) =>
+      items.map((item) => ({
         ...item,
         groups: getAddressGroupsForAddress(groupLookup, item.name),
       })),
-    [data, groupLookup]
+    [groupLookup]
   );
-  const filteredData = useMemo(() => {
-    const groupFiltered = decoratedData.filter((item) => {
+  const decoratedData = useMemo(
+    () => decorateAddressRows(data),
+    [data, decorateAddressRows]
+  );
+  const decoratedIndexData = useMemo(
+    () => decorateAddressRows(addressIndexData),
+    [addressIndexData, decorateAddressRows]
+  );
+  const addressIndexHasUserOwnership = useMemo(
+    () => addressIndexData.some((item) => !!getAdminAddressUserId(item)),
+    [addressIndexData]
+  );
+  const needsCompleteAddressIndex =
+    selectedUserId === "all" && (!!deferredQuery.trim() || groupFilter !== "all");
+  const filteredIndexData = useMemo(() => {
+    let next = decoratedIndexData;
+    next = next.filter((item) => {
       if (groupFilter === "all") return true;
       if (groupFilter === "ungrouped") return (item.groups?.length || 0) === 0;
       return item.groups?.some((group) => group.id === groupFilter);
     });
-    return filterAdminAddresses(groupFiltered, deferredQuery);
-  }, [decoratedData, deferredQuery, groupFilter]);
+    return filterAdminAddresses(next, deferredQuery);
+  }, [
+    decoratedIndexData,
+    deferredQuery,
+    groupFilter,
+  ]);
+  const filteredUserScopedData = useMemo(() => {
+    let next = decoratedData;
+    if (selectedUserId !== "all") {
+      next = next.filter((item) => getAdminAddressUserId(item) === selectedUserId);
+    }
+    next = next.filter((item) => {
+      if (groupFilter === "all") return true;
+      if (groupFilter === "ungrouped") return (item.groups?.length || 0) === 0;
+      return item.groups?.some((group) => group.id === groupFilter);
+    });
+    return filterAdminAddresses(next, deferredQuery);
+  }, [decoratedData, deferredQuery, groupFilter, selectedUserId]);
+  const filteredPagedData = useMemo(() => {
+    if (selectedUserId !== "all" && addressIndexHasUserOwnership) {
+      return decoratedData.filter((item) => getAdminAddressUserId(item) === selectedUserId);
+    }
+    return decoratedData;
+  }, [addressIndexHasUserOwnership, decoratedData, selectedUserId]);
+  const filteredData =
+    selectedUserId !== "all"
+      ? filteredUserScopedData
+      : needsCompleteAddressIndex
+        ? filteredIndexData
+        : filteredPagedData;
+  const selectedAddresses = useMemo(
+    () => filteredData.filter((item) => selectedAddressIds.has(item.id)),
+    [filteredData, selectedAddressIds]
+  );
+  const selectedGroupPendingCount = useMemo(() => {
+    if (groupFilter === "all" || groupFilter === "ungrouped") return 0;
+    const stored = Object.entries(groupMemberships).filter(([, ids]) =>
+      ids.includes(groupFilter)
+    );
+    if (addressIndexStatus !== "ready") return 0;
+    const indexed = new Set(
+      addressIndexData.map((item) => normalizeGroupAddress(item.name))
+    );
+    return stored.filter(([address]) => !indexed.has(address)).length;
+  }, [addressIndexData, addressIndexStatus, groupFilter, groupMemberships]);
 
   useEffect(() => {
     dataRef.current = data;
@@ -1474,12 +1822,20 @@ function AddressesPanel({
   }, [query]);
 
   useEffect(() => {
+    selectedUserIdRef.current = selectedUserId;
+  }, [selectedUserId]);
+
+  useEffect(() => {
     countRef.current = count;
   }, [count]);
 
   useEffect(() => {
     offsetRef.current = offset;
   }, [offset]);
+
+  useEffect(() => {
+    addressIndexDataRef.current = addressIndexData;
+  }, [addressIndexData]);
 
   const loadGroupsState = useCallback(async () => {
     const next = await getAddressGroupsLookup(groupScope);
@@ -1548,12 +1904,13 @@ function AddressesPanel({
       nextCount: number,
       nextOffset: number,
       q: string,
+      userId: "all" | string,
       options?: { defer?: boolean }
     ) => {
       dataRef.current = nextData;
       countRef.current = nextCount;
       offsetRef.current = nextOffset;
-      adminAddressesPanelCache.set(buildAdminAddressesCacheKey(q), {
+      adminAddressesPanelCache.set(buildAdminAddressesCacheKey(q, userId), {
         count: nextCount,
         data: nextData,
         offset: nextOffset,
@@ -1575,8 +1932,8 @@ function AddressesPanel({
   );
 
   const hydrateCachedPanel = useCallback(
-    (q: string = query) => {
-      const cached = adminAddressesPanelCache.get(buildAdminAddressesCacheKey(q));
+    (q: string = query, userId: "all" | string = selectedUserId) => {
+      const cached = adminAddressesPanelCache.get(buildAdminAddressesCacheKey(q, userId));
       if (!cached) return false;
       dataRef.current = cached.data;
       countRef.current = cached.count;
@@ -1587,7 +1944,7 @@ function AddressesPanel({
       setHasLoadedOnce(true);
       return true;
     },
-    [query]
+    [query, selectedUserId]
   );
 
   const load = useCallback(
@@ -1599,33 +1956,67 @@ function AddressesPanel({
       const refresh = !!options?.refresh;
       const silent = !!options?.silent;
       const background = !!options?.background;
+      const requestId = ++addressLoadRequestIdRef.current;
+      const requestedUserId = selectedUserIdRef.current;
 
       if (refresh) {
+        addressRefreshingRequestIdRef.current = requestId;
         setIsRefreshing(true);
       } else if (background && dataRef.current.length > 0) {
+        addressSyncingRequestIdRef.current = requestId;
         setIsSyncing(true);
       } else if (!silent && freshOffset === 0 && dataRef.current.length === 0) {
+        addressLoadingRequestIdRef.current = requestId;
         setIsLoading(true);
       }
       if (freshOffset === 0 && (!silent || dataRef.current.length === 0)) {
         setError(null);
       }
       try {
-        const page = await fetchAdminAddresses({
-          limit: PAGE_SIZE,
-          offset: freshOffset,
-          query: q,
-          sortBy: "updated_at",
-          sortOrder: "desc",
-        });
-        const nextData =
-          freshOffset === 0 ? page.results : [...dataRef.current, ...page.results];
-        const nextOffset =
-          freshOffset === 0 ? page.results.length : freshOffset + page.results.length;
-        commitPanelState(nextData, page.count, nextOffset, q, {
+        const page =
+          requestedUserId === "all"
+            ? await fetchAdminAddresses({
+                limit: PAGE_SIZE,
+                offset: freshOffset,
+                query: q,
+                sortBy: "updated_at",
+                sortOrder: "desc",
+              })
+            : await fetchAdminUserAddresses(requestedUserId, {
+                limit: PAGE_SIZE,
+                offset: freshOffset,
+              });
+        if (
+          requestId !== addressLoadRequestIdRef.current ||
+          selectedUserIdRef.current !== requestedUserId
+        ) {
+          return;
+        }
+        let nextData: AdminAddress[];
+        if (freshOffset === 0) {
+          nextData = page.results;
+        } else {
+          const existingIds = new Set(dataRef.current.map((item) => item.id));
+          const uniqueNewRows = page.results.filter((item) => !existingIds.has(item.id));
+          nextData = [...dataRef.current, ...uniqueNewRows];
+        }
+        const nextOffset = nextData.length;
+        const nextCount =
+          freshOffset > 0 && page.results.length > 0 && nextOffset === dataRef.current.length
+            ? nextOffset
+            : page.hasMore === false
+              ? nextOffset
+              : Math.max(page.count, nextOffset);
+        commitPanelState(nextData, nextCount, nextOffset, q, requestedUserId, {
           defer: background || silent,
         });
       } catch (err: any) {
+        if (
+          requestId !== addressLoadRequestIdRef.current ||
+          selectedUserIdRef.current !== requestedUserId
+        ) {
+          return;
+        }
         const message = err.message || "加载失败";
         if (freshOffset === 0 && dataRef.current.length === 0) {
           setError(message);
@@ -1637,11 +2028,16 @@ function AddressesPanel({
           Alert.alert("加载失败", message);
         }
       } finally {
-        if (refresh) {
+        if (addressRefreshingRequestIdRef.current === requestId) {
+          addressRefreshingRequestIdRef.current = 0;
           setIsRefreshing(false);
-        } else if (background) {
+        }
+        if (addressSyncingRequestIdRef.current === requestId) {
+          addressSyncingRequestIdRef.current = 0;
           setIsSyncing(false);
-        } else if (!silent) {
+        }
+        if (addressLoadingRequestIdRef.current === requestId) {
+          addressLoadingRequestIdRef.current = 0;
           setIsLoading(false);
         }
       }
@@ -1649,17 +2045,145 @@ function AddressesPanel({
     [commitPanelState, query]
   );
 
+  const loadAddressIndex = useCallback(
+    async (options?: { force?: boolean; quiet?: boolean }) => {
+      if (!mailState.isConfigured) return;
+      if (!options?.force && addressIndexStatus === "loading") return;
+      if (!options?.force && addressIndexStatus === "error") return;
+      if (!options?.force && addressIndexStatus === "ready" && addressIndexDataRef.current.length > 0) {
+        return;
+      }
+
+      const requestId = ++addressIndexRequestIdRef.current;
+      if (!options?.quiet) {
+        setAddressIndexError(null);
+      }
+      setAddressIndexStatus("loading");
+      try {
+        const byId = new Map<number, AdminAddress>();
+        let nextOffset = 0;
+        let total = 0;
+        let hasReliableTotal = false;
+
+        while (true) {
+          const page = await fetchAdminAddresses({
+            limit: ADDRESS_INDEX_PAGE_SIZE,
+            offset: nextOffset,
+            sortBy: "updated_at",
+            sortOrder: "desc",
+          });
+          if (requestId !== addressIndexRequestIdRef.current) return;
+
+          const reportedCount = typeof page.count === "number" ? page.count : 0;
+          if (reportedCount > 0) {
+            hasReliableTotal = true;
+            total = Math.max(total, reportedCount);
+          } else {
+            total = Math.max(total, nextOffset + page.results.length);
+          }
+          for (const item of page.results) {
+            byId.set(item.id, item);
+          }
+          const snapshot = Array.from(byId.values());
+          nextOffset += page.results.length;
+          startTransition(() => {
+            setAddressIndexData(snapshot);
+            setAddressIndexLoaded(snapshot.length);
+            setAddressIndexCount(total);
+          });
+
+          if (
+            page.results.length === 0 ||
+            page.results.length < ADDRESS_INDEX_PAGE_SIZE ||
+            (hasReliableTotal && nextOffset >= total)
+          ) {
+            break;
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        if (requestId !== addressIndexRequestIdRef.current) return;
+        setAddressIndexStatus("ready");
+      } catch (err: any) {
+        if (requestId !== addressIndexRequestIdRef.current) return;
+        setAddressIndexStatus("error");
+        setAddressIndexError(err?.message || "地址索引补全失败");
+      }
+    },
+    [addressIndexStatus, mailState.isConfigured]
+  );
+
+  const loadAdminUserList = useCallback(async () => {
+    if (
+      !mailState.isConfigured ||
+      userFetchStatus === "loading" ||
+      userFetchStatus === "ready" ||
+      userFetchStatus === "unsupported"
+    ) {
+      return;
+    }
+    setUserFetchStatus("loading");
+    try {
+      const byId = new Map<string, AdminUser>();
+      let nextOffset = 0;
+      let total = 0;
+      let hasReliableTotal = false;
+
+      while (true) {
+        const page = await fetchAdminUsers({
+          limit: ADMIN_USERS_PAGE_SIZE,
+          offset: nextOffset,
+        });
+        const rows = page.results || [];
+        const reportedCount = typeof page.count === "number" ? page.count : 0;
+        if (reportedCount > 0) {
+          hasReliableTotal = true;
+          total = Math.max(total, reportedCount);
+        } else {
+          total = Math.max(total, nextOffset + rows.length);
+        }
+        for (const user of rows) {
+          byId.set(String(user.id), user);
+        }
+        nextOffset += rows.length;
+
+        if (
+          rows.length === 0 ||
+          rows.length < ADMIN_USERS_PAGE_SIZE ||
+          (hasReliableTotal && nextOffset >= total)
+        ) {
+          break;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      setAdminUsers(Array.from(byId.values()));
+      setUserFetchStatus("ready");
+    } catch (err: any) {
+      const status = err?.status;
+      setUserFetchStatus(status === 404 || status === 405 ? "unsupported" : "error");
+    }
+  }, [mailState.isConfigured, userFetchStatus]);
+
   useEffect(() => {
     if (!shouldWarm) return;
 
-    const hydrated = hydrateCachedPanel(query);
-    const cached = adminAddressesPanelCache.get(buildAdminAddressesCacheKey(query));
+    const hydrated = hydrateCachedPanel(query, selectedUserId);
+    const cached = adminAddressesPanelCache.get(
+      buildAdminAddressesCacheKey(query, selectedUserId)
+    );
     const shouldRefresh =
       !cached || Date.now() - cached.fetchedAt > ADMIN_PANEL_STALE_TTL;
 
     if (!hasActivatedRef.current) {
       hasActivatedRef.current = true;
       activationRefreshAtRef.current = Date.now();
+      const warmIndexTask = InteractionManager.runAfterInteractions(() => {
+        void loadAddressIndex({ quiet: true });
+        void loadAdminUserList();
+      });
       if (shouldRefresh) {
         void load(
           0,
@@ -1671,23 +2195,74 @@ function AddressesPanel({
             : { silent: true }
         );
       }
-      return;
+      return () => warmIndexTask.cancel();
     }
 
-    if (!isActive) return;
+    const warmIndexTask = InteractionManager.runAfterInteractions(() => {
+      void loadAddressIndex({ quiet: true });
+      void loadAdminUserList();
+    });
 
-    if (shouldRefresh) {
+    if (!isActive) {
+      return () => warmIndexTask.cancel();
+    }
+
+    if (shouldRefresh && !needsCompleteAddressIndex) {
       void load(0, query, { background: hydrated });
     }
-  }, [hydrateCachedPanel, isActive, load, query, shouldWarm]);
+    return () => warmIndexTask.cancel();
+  }, [
+    hydrateCachedPanel,
+    isActive,
+    load,
+    loadAddressIndex,
+    loadAdminUserList,
+    needsCompleteAddressIndex,
+    query,
+    selectedUserId,
+    shouldWarm,
+  ]);
+
+  useEffect(() => {
+    if (!isActive || !needsCompleteAddressIndex) return;
+    void loadAddressIndex();
+  }, [isActive, loadAddressIndex, needsCompleteAddressIndex]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    if (selectedUserId !== "all") {
+      const hydrated = hydrateCachedPanel(queryRef.current, selectedUserId);
+      if (!hydrated && dataRef.current.length === 0) {
+        void load(0, queryRef.current, { silent: false });
+      }
+      return;
+    }
+    if (groupFilter !== "all" || queryRef.current.trim()) {
+      void loadAddressIndex();
+      return;
+    }
+    const hydrated = hydrateCachedPanel(queryRef.current, selectedUserId);
+    void load(0, queryRef.current, { silent: hydrated });
+  }, [
+    groupFilter,
+    hydrateCachedPanel,
+    isActive,
+    load,
+    loadAddressIndex,
+    selectedUserId,
+  ]);
 
   useEffect(() => {
     if (!isActive || !hasActivatedRef.current) return;
     const now = Date.now();
     if (now - activationRefreshAtRef.current < 1200) return;
     activationRefreshAtRef.current = now;
+    if (needsCompleteAddressIndex) {
+      void loadAddressIndex();
+      return;
+    }
     void load(0, queryRef.current, dataRef.current.length > 0 ? { background: true } : undefined);
-  }, [isActive, load]);
+  }, [isActive, load, loadAddressIndex, needsCompleteAddressIndex]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -1696,19 +2271,55 @@ function AddressesPanel({
       return;
     }
     const timer = setTimeout(() => {
-      const hydrated = hydrateCachedPanel(query);
+      if (selectedUserId !== "all") {
+        const hydrated = hydrateCachedPanel(query, selectedUserId);
+        if (!hydrated && dataRef.current.length === 0) {
+          void load(0, query, { silent: false });
+        }
+        return;
+      }
+      if (query.trim() || groupFilter !== "all") {
+        void loadAddressIndex();
+        return;
+      }
+      const hydrated = hydrateCachedPanel(query, selectedUserId);
       void load(0, query, { silent: hydrated });
     }, LIVE_SEARCH_DEBOUNCE);
     return () => clearTimeout(timer);
-  }, [hydrateCachedPanel, isActive, load, query]);
+  }, [
+    groupFilter,
+    hydrateCachedPanel,
+    isActive,
+    load,
+    loadAddressIndex,
+    query,
+    selectedUserId,
+  ]);
 
   const handleSearch = () => {
+    if (selectedUserId !== "all") {
+      void load(0, query, { refresh: false, silent: false });
+      return;
+    }
+    if (query.trim() || groupFilter !== "all") {
+      void loadAddressIndex({ force: addressIndexStatus === "error" });
+      return;
+    }
     void load(0, query, { refresh: false, silent: false });
   };
 
   const handleResetSearch = () => {
     setQuery("");
-    const hydrated = hydrateCachedPanel("");
+    if (selectedUserId !== "all") {
+      const hydrated = hydrateCachedPanel("", selectedUserId);
+      void load(0, "", { silent: hydrated });
+      return;
+    }
+    if (groupFilter !== "all") {
+      void loadAddressIndex();
+      return;
+    }
+    const hydrated = hydrateCachedPanel("", selectedUserId);
     void load(0, "", { silent: hydrated });
   };
 
@@ -1724,7 +2335,19 @@ function AddressesPanel({
           onPress: async () => {
             try {
               await adminDeleteAddress(item.id);
+              clearAdminAddressesPanelCache();
               setData((prev) => prev.filter((x) => x.id !== item.id));
+              setAddressIndexData((prev) => prev.filter((x) => x.id !== item.id));
+              setCount((prev) => Math.max(0, prev - 1));
+              setAddressIndexCount((prev) => Math.max(0, prev - 1));
+              setAddressIndexLoaded((prev) => Math.max(0, prev - 1));
+              setSelectedAddressIds((prev) => {
+                if (!prev.has(item.id)) return prev;
+                const next = new Set(prev);
+                next.delete(item.id);
+                return next;
+              });
+              onMiniToast("地址已删除");
             } catch (err: any) {
               Alert.alert("删除失败", err.message || "");
             }
@@ -1732,7 +2355,7 @@ function AddressesPanel({
         },
       ]
     );
-  }, []);
+  }, [onMiniToast]);
 
   const handleClearInbox = useCallback((item: AdminAddress) => {
     Alert.alert("清空收件箱", `清空 ${item.name} 的收件箱？`, [
@@ -1743,6 +2366,7 @@ function AddressesPanel({
         onPress: async () => {
           try {
             await adminClearInbox(item.name);
+            clearAdminAddressesPanelCache();
             Alert.alert("已清空");
           } catch (err: any) {
             Alert.alert("失败", err.message || "");
@@ -1808,8 +2432,10 @@ function AddressesPanel({
         jwt: result.jwt,
         password: result.password,
       });
+      clearAdminAddressesPanelCache();
       onMiniToast("已创建邮箱");
       await load(0, query, { refresh: true });
+      void loadAddressIndex({ force: true, quiet: true });
     } catch (err: any) {
       Alert.alert("创建失败", err.message || "");
     } finally {
@@ -1819,6 +2445,7 @@ function AddressesPanel({
     customPrefix,
     currentDomainSupportsRandom,
     load,
+    loadAddressIndex,
     newName,
     onMiniToast,
     query,
@@ -1927,8 +2554,10 @@ function AddressesPanel({
       setCredentialInput("");
       setBindEmail("");
       setBindPassword("");
+      clearAdminAddressesPanelCache();
       onMiniToast("已绑定地址");
       await load(0, query, { refresh: true });
+      void loadAddressIndex({ force: true, quiet: true });
     } catch (err: any) {
       Alert.alert("绑定失败", err.message || "");
     } finally {
@@ -1942,8 +2571,437 @@ function AddressesPanel({
     importByCredential,
     importByPassword,
     load,
+    loadAddressIndex,
     onMiniToast,
     query,
+  ]);
+
+  const closeUserFilterMenu = useCallback(() => {
+    setShowUserFilterMenu(false);
+    setUserFilterMenuFrame(null);
+  }, []);
+
+  const toggleUserFilterMenu = useCallback(() => {
+    if (showUserFilterMenu) {
+      closeUserFilterMenu();
+      return;
+    }
+
+    if (userFetchStatus === "idle" || userFetchStatus === "error") {
+      void loadAdminUserList();
+    }
+
+    const rootNode = addressPanelRootRef.current;
+    const triggerNode = userFilterTriggerRef.current;
+    if (!rootNode || !triggerNode) {
+      setUserFilterMenuFrame({ top: 78, left: 16, width: 220 });
+      setShowUserFilterMenu(true);
+      return;
+    }
+
+    rootNode.measureInWindow((rootX, rootY, rootWidth) => {
+      triggerNode.measureInWindow((triggerX, triggerY, triggerWidth, triggerHeight) => {
+        const width = Math.max(190, Math.min(rootWidth - 32, 260));
+        const triggerCenter = triggerX - rootX + triggerWidth / 2;
+        const left = Math.max(16, Math.min(triggerCenter - width / 2, rootWidth - width - 16));
+        setUserFilterMenuFrame({
+          top: triggerY - rootY + triggerHeight + 8,
+          left,
+          width,
+        });
+        setShowUserFilterMenu(true);
+      });
+    });
+  }, [closeUserFilterMenu, loadAdminUserList, showUserFilterMenu, userFetchStatus]);
+
+  const handleSelectUser = useCallback(
+    (nextUserId: "all" | string) => {
+      addressLoadRequestIdRef.current += 1;
+      addressRefreshingRequestIdRef.current = 0;
+      addressSyncingRequestIdRef.current = 0;
+      addressLoadingRequestIdRef.current = 0;
+      setIsRefreshing(false);
+      setIsSyncing(false);
+      setIsLoading(false);
+      selectedUserIdRef.current = nextUserId;
+      setSelectedUserId(nextUserId);
+      setSelectedAddressIds(new Set());
+      setSelectionMode(false);
+      closeUserFilterMenu();
+      const hydrated = hydrateCachedPanel(queryRef.current, nextUserId);
+      if (!hydrated) {
+        dataRef.current = [];
+        countRef.current = 0;
+        offsetRef.current = 0;
+        setData([]);
+        setCount(0);
+        setOffset(0);
+        setHasLoadedOnce(false);
+      }
+    },
+    [closeUserFilterMenu, hydrateCachedPanel]
+  );
+
+  const toggleAddressSelection = useCallback((item: AdminAddress) => {
+    setSelectionMode(true);
+    setSelectedAddressIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(item.id)) {
+        next.delete(item.id);
+      } else {
+        next.add(item.id);
+      }
+      return next;
+    });
+  }, []);
+
+  const enterSelectionWithAddress = useCallback((item: AdminAddress) => {
+    setSelectionMode(true);
+    setSelectedAddressIds((prev) => {
+      const next = new Set(prev);
+      next.add(item.id);
+      return next;
+    });
+  }, []);
+
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedAddressIds(new Set());
+  }, []);
+
+  const selectCurrentFilteredAddresses = useCallback(() => {
+    setSelectionMode(true);
+    setSelectedAddressIds(new Set(filteredData.map((item) => item.id)));
+    onMiniToast(`已选择 ${filteredData.length} 个地址`);
+  }, [filteredData, onMiniToast]);
+
+  const closeBulkModal = useCallback(() => {
+    setBulkModal({ visible: false, mode: "actions", addresses: [] });
+  }, []);
+
+  const getBulkScopeAddresses = useCallback(
+    (action: AddressBulkActionKind) => {
+      const base = selectedAddresses.length > 0 ? selectedAddresses : filteredData;
+      if (action === "delete_empty") {
+        return base.filter(
+          (item) => (item.mail_count ?? 0) <= 0 && (item.send_count ?? 0) <= 0
+        );
+      }
+      return base;
+    },
+    [filteredData, selectedAddresses]
+  );
+
+  const openBulkActionPicker = useCallback(() => {
+    setSelectionMode(true);
+    setBulkModal({
+      visible: true,
+      mode: "actions",
+      addresses: selectedAddresses.length > 0 ? selectedAddresses : filteredData,
+    });
+  }, [filteredData, selectedAddresses]);
+
+  const prepareBulkPreview = useCallback(
+    async (action: AddressBulkActionKind, group?: AddressGroup) => {
+      const scopeAddresses = getBulkScopeAddresses(action);
+      if (scopeAddresses.length === 0) {
+        onMiniToast(action === "delete_empty" ? "当前范围没有空邮箱" : "没有可操作地址");
+        return;
+      }
+
+      if ((action === "add_group" || action === "remove_group") && !group) {
+        if (addressGroups.length === 0) {
+          onMiniToast("请先创建分组");
+          return;
+        }
+        setBulkModal({
+          visible: true,
+          mode: "groupPicker",
+          action,
+          addresses: scopeAddresses,
+        });
+        return;
+      }
+
+      if (!isServerAddressBulkAction(action)) {
+        setBulkModal({
+          visible: true,
+          mode: "preview",
+          action,
+          addresses: scopeAddresses,
+          targetGroup: group,
+          preview: buildLocalAddressBulkPreview(action, scopeAddresses),
+        });
+        return;
+      }
+
+      const payload = {
+        action,
+        address_ids: scopeAddresses.map((item) => item.id),
+        addresses: scopeAddresses.map((item) => item.name),
+        filters: {
+          query: query.trim() || undefined,
+          user_id: selectedUserId === "all" ? undefined : selectedUserId,
+          group_id: groupFilter === "all" || groupFilter === "ungrouped" ? undefined : groupFilter,
+        },
+      };
+
+      setBulkModal({
+        visible: true,
+        mode: "preview",
+        action,
+        addresses: scopeAddresses,
+        targetGroup: group,
+      });
+
+      try {
+        const preview = await adminBulkPreview(payload);
+        setBulkModal({
+          visible: true,
+          mode: "preview",
+          action,
+          addresses: scopeAddresses,
+          targetGroup: group,
+          preview,
+        });
+      } catch {
+        setBulkModal({
+          visible: true,
+          mode: "preview",
+          action,
+          addresses: scopeAddresses,
+          targetGroup: group,
+          preview: buildLocalAddressBulkPreview(action, scopeAddresses),
+        });
+      }
+    },
+    [
+      addressGroups.length,
+      getBulkScopeAddresses,
+      groupFilter,
+      onMiniToast,
+      query,
+      selectedUserId,
+    ]
+  );
+
+  const applyBulkLocalMutations = useCallback(
+    (action: AddressBulkActionKind, addresses: AddressListItemData[]) => {
+      clearAdminAddressesPanelCache();
+      if (action === "delete_addresses" || action === "delete_empty") {
+        const deletedIds = new Set(addresses.map((item) => item.id));
+        setData((prev) => prev.filter((item) => !deletedIds.has(item.id)));
+        setAddressIndexData((prev) => prev.filter((item) => !deletedIds.has(item.id)));
+        setCount((prev) => Math.max(0, prev - deletedIds.size));
+        setAddressIndexCount((prev) => Math.max(0, prev - deletedIds.size));
+        setAddressIndexLoaded((prev) => Math.max(0, prev - deletedIds.size));
+        setSelectedAddressIds((prev) => {
+          const next = new Set(prev);
+          deletedIds.forEach((id) => next.delete(id));
+          return next;
+        });
+        return;
+      }
+
+      const updateCounts = (item: AdminAddress) => {
+        if (!addresses.some((addressItem) => addressItem.id === item.id)) return item;
+        return {
+          ...item,
+          mail_count:
+            action === "clear_inbox" || action === "clear_all" ? 0 : item.mail_count,
+          send_count:
+            action === "clear_sent" || action === "clear_all" ? 0 : item.send_count,
+        };
+      };
+      setData((prev) => prev.map(updateCounts));
+      setAddressIndexData((prev) => prev.map(updateCounts));
+    },
+    []
+  );
+
+  const executeBulkFallback = useCallback(
+    async (
+      action: AddressBulkActionKind,
+      addresses: AddressListItemData[],
+      group: AddressGroup | undefined,
+      onProgress: (done: number) => void
+    ) => {
+      const failures: AddressBulkFailure[] = [];
+      let done = 0;
+
+      for (const item of addresses) {
+        try {
+          if (action === "delete_addresses" || action === "delete_empty") {
+            await adminDeleteAddress(item.id);
+          } else if (action === "clear_inbox") {
+            await adminClearInbox(item.name);
+          } else if (action === "clear_sent") {
+            await adminClearSentItems(item.name);
+          } else if (action === "clear_all") {
+            await adminClearInbox(item.name);
+            await adminClearSentItems(item.name);
+          } else if (action === "add_group" && group) {
+            await addAddressToGroup(groupScope, item.name, group.id);
+          } else if (action === "remove_group" && group) {
+            await removeAddressFromGroup(groupScope, item.name, group.id);
+          }
+        } catch (err: any) {
+          failures.push({
+            id: item.id,
+            address: item.name,
+            error: err?.message || "操作失败",
+          });
+        } finally {
+          done += 1;
+          onProgress(done);
+        }
+      }
+
+      return failures;
+    },
+    [groupScope]
+  );
+
+  const executeBulkAction = useCallback(async () => {
+    if (!bulkModal.action || bulkModal.addresses.length === 0) return;
+    const action = bulkModal.action;
+    const scopeAddresses = bulkModal.addresses;
+    const targetGroup = bulkModal.targetGroup;
+    setBulkModal((prev) => ({
+      ...prev,
+      mode: "executing",
+      progressDone: 0,
+      error: undefined,
+    }));
+
+    try {
+      let result: AdminBulkExecuteResponse | undefined;
+      let failures: AddressBulkFailure[] = [];
+
+      if (isServerAddressBulkAction(action)) {
+        const payload = {
+          action,
+          address_ids: scopeAddresses.map((item) => item.id),
+          addresses: scopeAddresses.map((item) => item.name),
+          confirm: true,
+        };
+
+        try {
+          result = await adminBulkExecute(payload);
+          failures = result.failures || [];
+          setBulkModal((prev) => ({
+            ...prev,
+            progressDone: scopeAddresses.length,
+          }));
+        } catch {
+          failures = await executeBulkFallback(action, scopeAddresses, undefined, (done) => {
+            setBulkModal((prev) => ({ ...prev, progressDone: done }));
+          });
+          result = {
+            ...buildLocalAddressBulkPreview(action, scopeAddresses),
+            success_count: scopeAddresses.length - failures.length,
+            failed_count: failures.length,
+            failures,
+          };
+        }
+      } else {
+        failures = await executeBulkFallback(action, scopeAddresses, targetGroup, (done) => {
+          setBulkModal((prev) => ({ ...prev, progressDone: done }));
+        });
+        result = {
+          ...buildLocalAddressBulkPreview(action, scopeAddresses),
+          success_count: scopeAddresses.length - failures.length,
+          failed_count: failures.length,
+          failures,
+        };
+      }
+
+      const successfulAddresses =
+        failures.length > 0
+          ? scopeAddresses.filter(
+              (item) =>
+                !failures.some(
+                  (failure) =>
+                    String(failure.id || "") === String(item.id) ||
+                    normalizeGroupAddress(failure.address || "") ===
+                      normalizeGroupAddress(item.name)
+                )
+            )
+          : scopeAddresses;
+      applyBulkLocalMutations(action, successfulAddresses);
+      if (action === "add_group" || action === "remove_group") {
+        await loadGroupsState();
+      }
+      setBulkModal((prev) => ({
+        ...prev,
+        mode: "done",
+        result,
+        failures,
+      }));
+      onMiniToast(
+        failures.length > 0
+          ? `完成，${failures.length} 项失败`
+          : `${getAddressBulkActionLabel(action)}完成`
+      );
+    } catch (err: any) {
+      setBulkModal((prev) => ({
+        ...prev,
+        mode: "preview",
+        error: err?.message || "批量操作失败",
+      }));
+    }
+  }, [
+    applyBulkLocalMutations,
+    bulkModal.action,
+    bulkModal.addresses,
+    bulkModal.targetGroup,
+    executeBulkFallback,
+    loadGroupsState,
+    onMiniToast,
+  ]);
+
+  const addressStatusSummary = useMemo(() => {
+    const shouldShowIndexProgress = selectedUserId === "all" && needsCompleteAddressIndex;
+    const indexProgress =
+      shouldShowIndexProgress && addressIndexStatus === "loading"
+        ? ` · 索引 ${addressIndexLoaded}/${addressIndexCount || count || "?"}`
+        : shouldShowIndexProgress && addressIndexStatus === "error"
+          ? ` · 索引失败${addressIndexError ? `：${addressIndexError}` : ""}`
+          : "";
+    const pendingText = selectedGroupPendingCount > 0
+      ? ` · ${selectedGroupPendingCount} 个待同步确认`
+      : "";
+    if (selectionMode) {
+      return `已选 ${selectedAddressIds.size} 个 · 当前 ${filteredData.length} 个${indexProgress}`;
+    }
+    if (selectedUserId !== "all") {
+      return `${selectedUserLabel} · ${filteredData.length} 个地址${indexProgress}${pendingText}`;
+    }
+    if (query.trim()) {
+      return `当前显示 ${filteredData.length} / 总计 ${addressIndexCount || count}${indexProgress}`;
+    }
+    if (groupFilter === "ungrouped") {
+      return `未分组 ${filteredData.length} 个${indexProgress}${pendingText}`;
+    }
+    if (groupFilter !== "all") {
+      return `当前分组 ${filteredData.length} 个${indexProgress}${pendingText}`;
+    }
+    return `共 ${count} 个地址${indexProgress}`;
+  }, [
+    addressIndexCount,
+    addressIndexError,
+    addressIndexLoaded,
+    addressIndexStatus,
+    count,
+    filteredData.length,
+    groupFilter,
+    needsCompleteAddressIndex,
+    query,
+    selectedAddressIds.size,
+    selectedGroupPendingCount,
+    selectedUserId,
+    selectedUserLabel,
+    selectionMode,
   ]);
 
   const renderAddressItem = useCallback(
@@ -1958,10 +3016,15 @@ function AddressesPanel({
         onShowCredential={handleShowCredential}
         onClearInbox={handleClearInbox}
         onDelete={handleDelete}
+        selectionMode={selectionMode}
+        selected={selectedAddressIds.has(item.id)}
+        onToggleSelect={toggleAddressSelection}
+        onLongPress={enterSelectionWithAddress}
       />
     ),
     [
       colors,
+      enterSelectionWithAddress,
       handleClearInbox,
       handleDelete,
       handleGroupAddress,
@@ -1969,11 +3032,14 @@ function AddressesPanel({
       handleShowCredential,
       highlightStyle,
       query,
+      selectedAddressIds,
+      selectionMode,
+      toggleAddressSelection,
     ]
   );
 
   return (
-    <View style={{ flex: 1 }}>
+    <View ref={addressPanelRootRef} style={{ flex: 1 }}>
       <View style={[styles.addressToolbar, { borderBottomColor: colors.border }]}>
         <View
           style={[
@@ -1999,6 +3065,35 @@ function AddressesPanel({
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.groupFilterRow}
           >
+            <View ref={userFilterTriggerRef}>
+              <Pressable
+                hitSlop={COMPACT_HIT_SLOP}
+                onPress={toggleUserFilterMenu}
+                style={({ pressed }) => [
+                  styles.groupFilterChip,
+                  styles.userFilterChip,
+                  {
+                    backgroundColor:
+                      selectedUserId === "all" ? colors.surface : `${colors.primary}14`,
+                    borderColor:
+                      selectedUserId === "all" ? colors.border : `${colors.primary}30`,
+                    opacity: pressed ? 0.78 : 1,
+                  },
+                ]}
+              >
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.groupFilterChipText,
+                    {
+                      color: selectedUserId === "all" ? colors.muted : colors.primary,
+                    },
+                  ]}
+                >
+                  {selectedUserLabel} ▾
+                </Text>
+              </Pressable>
+            </View>
             <Pressable
               hitSlop={COMPACT_HIT_SLOP}
               onPress={() => setGroupFilter("all")}
@@ -2085,20 +3180,93 @@ function AddressesPanel({
               <Text numberOfLines={1} style={styles.addressToolbarStatusLine}>
                 <Text style={{ color: colors.primary }}>地址列表</Text>
                 <Text style={{ color: colors.border }}> · </Text>
-                <Text style={{ color: colors.muted }}>
-                  {query.trim()
-                    ? `当前显示 ${filteredData.length} / 总计 ${count}`
-                    : groupFilter === "ungrouped"
-                      ? `未分组 ${filteredData.length} 个`
-                      : groupFilter !== "all"
-                        ? `当前分组 ${filteredData.length} 个`
-                        : `共 ${count} 个地址`}
-                </Text>
+                <Text style={{ color: colors.muted }}>{addressStatusSummary}</Text>
               </Text>
-              {isSyncing ? <InlineSyncBadge colors={colors} compact /> : null}
+              {isSyncing || (needsCompleteAddressIndex && addressIndexStatus === "loading") ? (
+                <InlineSyncBadge colors={colors} compact />
+              ) : null}
             </View>
           </View>
           <View style={styles.addressToolbarActions}>
+            {selectionMode ? (
+              <>
+                <Pressable
+                  hitSlop={COMPACT_HIT_SLOP}
+                  onPress={selectCurrentFilteredAddresses}
+                  style={({ pressed }) => [
+                    styles.ghostActionButton,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.border,
+                      opacity: pressed ? 0.7 : 1,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.ghostActionText, { color: colors.foreground }]}>
+                    全选当前
+                  </Text>
+                </Pressable>
+                <Pressable
+                  hitSlop={COMPACT_HIT_SLOP}
+                  onPress={() => setSelectedAddressIds(new Set())}
+                  style={({ pressed }) => [
+                    styles.ghostActionButton,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.border,
+                      opacity: pressed ? 0.7 : 1,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.ghostActionText, { color: colors.muted }]}>
+                    清空
+                  </Text>
+                </Pressable>
+                <Pressable
+                  hitSlop={COMPACT_HIT_SLOP}
+                  onPress={openBulkActionPicker}
+                  style={({ pressed }) => [
+                    styles.primaryActionButton,
+                    { backgroundColor: colors.primary, opacity: pressed ? 0.8 : 1 },
+                  ]}
+                >
+                  <Text style={styles.primaryActionText}>操作</Text>
+                </Pressable>
+                <Pressable
+                  hitSlop={COMPACT_HIT_SLOP}
+                  onPress={exitSelectionMode}
+                  style={({ pressed }) => [
+                    styles.ghostActionButton,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.border,
+                      opacity: pressed ? 0.7 : 1,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.ghostActionText, { color: colors.muted }]}>
+                    退出
+                  </Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Pressable
+                  hitSlop={COMPACT_HIT_SLOP}
+                  onPress={openBulkActionPicker}
+                  style={({ pressed }) => [
+                    styles.ghostActionButton,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.border,
+                      opacity: pressed ? 0.7 : 1,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.ghostActionText, { color: colors.foreground }]}>
+                    批量
+                  </Text>
+                </Pressable>
             <Pressable
               hitSlop={COMPACT_HIT_SLOP}
               onPress={() => setShowGroupManager(true)}
@@ -2172,9 +3340,71 @@ function AddressesPanel({
             >
               <Text style={styles.primaryActionText}>搜索</Text>
             </Pressable>
+              </>
+            )}
           </View>
         </View>
       </View>
+      {showUserFilterMenu ? (
+        <View pointerEvents="box-none" style={styles.mailFilterLayer}>
+          <Pressable style={styles.mailFilterBackdrop} onPress={closeUserFilterMenu} />
+          <Animated.View
+            entering={FadeIn.duration(80)}
+            exiting={FadeOut.duration(60)}
+            style={[
+              styles.addressUserFilterPopover,
+              {
+                top: userFilterMenuFrame?.top ?? 0,
+                left: userFilterMenuFrame?.left ?? 16,
+                width: userFilterMenuFrame?.width ?? 220,
+                backgroundColor: colors.surface,
+                borderColor: colors.border,
+                shadowColor: "#000000",
+              },
+            ]}
+          >
+            <ScrollView
+              style={styles.addressUserFilterScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <AddressUserFilterOption
+                colors={colors}
+                label="全部用户"
+                subtitle="显示所有地址"
+                selected={selectedUserId === "all"}
+                onPress={() => handleSelectUser("all")}
+              />
+              {inferredUsers.map((user) => {
+                const userId = String(user.id);
+                return (
+                  <AddressUserFilterOption
+                    key={userId}
+                    colors={colors}
+                    label={getAdminUserDisplayName(user)}
+                    subtitle={
+                      typeof user.address_count === "number"
+                        ? `${user.address_count} 个地址${user.role_text ? ` · ${user.role_text}` : ""}`
+                        : user.user_email || user.email || `用户 #${userId}`
+                    }
+                    selected={selectedUserId === userId}
+                    onPress={() => handleSelectUser(userId)}
+                  />
+                );
+              })}
+              {inferredUsers.length === 0 ? (
+                <Text style={[styles.addressUserFilterEmpty, { color: colors.muted }]}>
+                  {userFetchStatus === "unsupported"
+                    ? "当前 Worker 暂未提供用户列表，将在地址索引完成后从地址中识别用户。"
+                    : userFetchStatus === "error"
+                      ? "用户列表加载失败，点击“全部用户”可重试。"
+                      : "正在识别用户信息。"}
+                </Text>
+              ) : null}
+            </ScrollView>
+          </Animated.View>
+        </View>
+      ) : null}
       {isLoading && data.length === 0 ? (
         <View style={styles.addressLoadingWrap}>
           <PanelStateCard
@@ -2216,13 +3446,16 @@ function AddressesPanel({
               refreshing={isRefreshing}
               onRefresh={() => {
                 void load(0, query, { refresh: true });
+                if (selectedUserId === "all") {
+                  void loadAddressIndex({ force: true, quiet: true });
+                }
               }}
               tintColor={colors.primary}
               colors={[colors.primary]}
             />
           }
           onEndReached={() => {
-            if (offset < count && !isLoading) {
+            if (!needsCompleteAddressIndex && offset < count && !isLoading) {
               void load(offset);
             }
           }}
@@ -2233,14 +3466,26 @@ function AddressesPanel({
               <PanelStateCard
                 colors={colors}
                 icon={query.trim() ? "magnifyingglass" : "at"}
-                title={query.trim() ? "没有找到匹配地址" : "还没有地址"}
+                title={
+                  query.trim()
+                      ? "没有找到匹配地址"
+                      : "还没有地址"
+                }
                 subtitle={
                   query.trim()
                     ? "换个关键词试试，或者清空搜索查看全部地址。"
-                    : "创建或导入地址后，这里会显示完整列表。"
+                    : selectedUserId !== "all"
+                      ? "这个用户当前没有绑定地址，或者地址已经被筛选条件隐藏。"
+                      : "创建或导入地址后，这里会显示完整列表。"
                 }
-                actionLabel={query.trim() ? "清空搜索" : undefined}
-                onAction={query.trim() ? handleResetSearch : undefined}
+                actionLabel={query.trim() ? "清空搜索" : selectedUserId !== "all" ? "查看全部用户" : undefined}
+                onAction={
+                  query.trim()
+                      ? handleResetSearch
+                      : selectedUserId !== "all"
+                        ? () => handleSelectUser("all")
+                        : undefined
+                }
               />
             ) : (
               <PanelStateCard
@@ -2253,13 +3498,24 @@ function AddressesPanel({
             )
           }
           ListFooterComponent={
-            isLoading ? (
+            isLoading || (needsCompleteAddressIndex && addressIndexStatus === "loading") ? (
               <ActivityIndicator style={{ marginVertical: 20 }} color={colors.primary} />
             ) : null
           }
           renderItem={renderAddressItem}
         />
       )}
+      <AddressBulkActionModal
+        visible={bulkModal.visible}
+        colors={colors}
+        state={bulkModal}
+        groups={addressGroups}
+        selectedCount={selectedAddressIds.size}
+        fallbackScopeCount={filteredData.length}
+        onClose={closeBulkModal}
+        onPreview={prepareBulkPreview}
+        onExecute={executeBulkAction}
+      />
       <Modal
         visible={showCreateModal}
         transparent
@@ -2777,7 +4033,7 @@ function MailsPanel({
   shouldWarm,
 }: {
   colors: ReturnType<typeof useColors>;
-  kind: "inbox" | "sendbox" | "unknown";
+  kind: AdminMailPanelKind;
   onMiniToast: (message: string) => void;
   isActive: boolean;
   shouldWarm: boolean;
@@ -2793,11 +4049,19 @@ function MailsPanel({
   const [mailGroupFilter, setMailGroupFilter] = useState<"all" | "ungrouped" | string>("all");
   const [showMailGroupFilterMenu, setShowMailGroupFilterMenu] = useState(false);
   const [mailFilterMenuFrame, setMailFilterMenuFrame] = useState<MailFilterMenuFrame | null>(null);
+  const [showMailboxViewMenu, setShowMailboxViewMenu] = useState(false);
+  const [mailboxViewMenuFrame, setMailboxViewMenuFrame] = useState<MailFilterMenuFrame | null>(null);
+  const [mailActionMenu, setMailActionMenu] = useState<{
+    anchor: FloatingActionMenuAnchor;
+    items: FloatingActionMenuItem[];
+  } | null>(null);
   const [mailGroups, setMailGroups] = useState<AddressGroup[]>([]);
   const [mailGroupLookup, setMailGroupLookup] = useState<Map<string, AddressGroup[]>>(new Map());
   const [creatingAddress, setCreatingAddress] = useState<string | null>(null);
   const [createdUnknownAddresses, setCreatedUnknownAddresses] = useState<Record<string, true>>({});
   const [unreadMailKeys, setUnreadMailKeys] = useState<Set<string>>(new Set());
+  const [blockedSenders, setBlockedSenders] = useState<Set<string>>(new Set());
+  const [inboxMailboxView, setInboxMailboxView] = useState<InboxMailboxView>("inbox");
   const [address, setAddress] = useState("");
   const deferredAddress = useDeferredValue(address);
   const dataRef = useRef<ParsedMail[]>([]);
@@ -2811,11 +4075,18 @@ function MailsPanel({
   const activationRefreshAtRef = useRef(0);
   const mailPanelRootRef = useRef<React.ElementRef<typeof View>>(null);
   const mailFilterTriggerRef = useRef<React.ElementRef<typeof View>>(null);
+  const mailboxViewTriggerRef = useRef<React.ElementRef<typeof View>>(null);
   const groupScope = mailState.workerUrl;
   const readStateScope = mailState.workerUrl;
-  const supportsMailGroupFilter = kind === "inbox";
+  const isSpamView = kind === "inbox" && inboxMailboxView === "spam";
+  const panelCacheKind: AdminMailCacheKind = isSpamView ? "spam" : kind;
+  const supportsMailGroupFilter = kind === "inbox" && !isSpamView;
+  const supportsSpamToggle = kind === "inbox";
   const shouldLoadMailGroups = supportsMailGroupFilter;
-  const readStateViewKey = useMemo(() => `admin:${kind}`, [kind]);
+  const readStateViewKey = useMemo(
+    () => (isSpamView ? "admin:spam" : `admin:${kind}`),
+    [isSpamView, kind]
+  );
   const highlightStyle = useMemo(
     () => ({
       backgroundColor: `${colors.primary}26`,
@@ -2835,10 +4106,18 @@ function MailsPanel({
     () => getGroupFilterLabel(mailGroupFilter, mailGroups),
     [mailGroupFilter, mailGroups]
   );
-  const groupFilteredData = useMemo(() => {
-    if (!supportsMailGroupFilter || mailGroupFilter === "all") return data;
+  const spamFilteredData = useMemo(() => {
+    if (kind === "sendbox") return data;
+    if (isSpamView) {
+      return data.filter((item) => isAdminMailSpamBySenderSet(item, blockedSenders));
+    }
+    return data.filter((item) => !isAdminMailSpamBySenderSet(item, blockedSenders));
+  }, [blockedSenders, data, isSpamView, kind]);
 
-    return data.filter((item) => {
+  const groupFilteredData = useMemo(() => {
+    if (!supportsMailGroupFilter || mailGroupFilter === "all") return spamFilteredData;
+
+    return spamFilteredData.filter((item) => {
       const targetAddress = getManagedAddressForMail(item, kind);
       const groups = getAddressGroupsForAddress(mailGroupLookup, targetAddress);
       if (mailGroupFilter === "ungrouped") {
@@ -2846,7 +4125,7 @@ function MailsPanel({
       }
       return groups.some((group) => group.id === mailGroupFilter);
     });
-  }, [data, kind, mailGroupFilter, mailGroupLookup, supportsMailGroupFilter]);
+  }, [kind, mailGroupFilter, mailGroupLookup, spamFilteredData, supportsMailGroupFilter]);
   const visibleData = useMemo(
     () => filterAdminMailsIndexed(groupFilteredData, deferredAddress, mailSearchIndex),
     [groupFilteredData, deferredAddress, mailSearchIndex]
@@ -2894,6 +4173,32 @@ function MailsPanel({
     };
   }, [kind, readStateScope]);
 
+  useEffect(() => {
+    if (kind === "sendbox" || !groupScope.trim()) {
+      setBlockedSenders(new Set());
+      return;
+    }
+
+    let isMounted = true;
+    const refresh = async () => {
+      const nextBlockedSenders = await loadAdminMailSpamSenderSet(groupScope);
+      if (isMounted) {
+        setBlockedSenders(nextBlockedSenders);
+      }
+    };
+
+    void refresh();
+    const unsubscribe = subscribeAdminMailSpamState((event) => {
+      if (event.workerUrl !== groupScope) return;
+      setBlockedSenders(new Set(event.blockedSenders));
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [groupScope, kind]);
+
   const loadMailGroupsState = useCallback(async () => {
     const next = await getAddressGroupsLookup(groupScope);
     setMailGroups(next.groups);
@@ -2936,7 +4241,7 @@ function MailsPanel({
       countRef.current = nextCount;
       offsetRef.current = nextOffset;
       queryRef.current = queryToken;
-      adminMailPanelCache.set(buildAdminMailCacheKey(kind, queryToken), {
+      adminMailPanelCache.set(buildAdminMailCacheKey(panelCacheKind, queryToken), {
         count: nextCount,
         data: nextData,
         offset: nextOffset,
@@ -2954,29 +4259,26 @@ function MailsPanel({
         applyState();
       }
     },
-    [kind]
+    [panelCacheKind]
   );
 
   const clearKindCaches = useCallback(() => {
-    for (const key of adminMailPanelCache.keys()) {
-      if (key.startsWith(`${kind}:`)) {
-        adminMailPanelCache.delete(key);
-      }
-    }
-    adminMailSearchDatasetCache.delete(kind);
-  }, [kind]);
+    clearAdminMailCacheKinds(
+      panelCacheKind === "spam" ? ["spam", "inbox", "unknown"] : [panelCacheKind]
+    );
+  }, [panelCacheKind]);
 
   const hydrateCachedPanel = useCallback(
     (addr: string = address) => {
       const queryToken = normalizeAdminMailQuery(addr);
       const cached = adminMailPanelCache.get(
-        buildAdminMailCacheKey(kind, queryToken)
+        buildAdminMailCacheKey(panelCacheKind, queryToken)
       );
       if (!cached) return false;
       commitPanelState(cached.data, cached.count, cached.offset, queryToken);
       return true;
     },
-    [address, commitPanelState, kind]
+    [address, commitPanelState, panelCacheKind]
   );
 
   const load = useCallback(
@@ -2995,6 +4297,27 @@ function MailsPanel({
         setIsLoading(true);
       }
       try {
+        if (isSpamView) {
+          const spamDataset = await fetchAdminSpamMailboxDataset(blockedSenders);
+          if (requestId !== requestIdRef.current) return;
+
+          if (readStateScope.trim()) {
+            const nextUnreadKeys = await reconcileAdminMailReadState({
+              workerUrl: readStateScope,
+              viewKey: readStateViewKey,
+              mails: spamDataset.data,
+              allowMarkUnread: freshOffset === 0,
+            });
+            if (requestId !== requestIdRef.current) return;
+            setUnreadMailKeys(nextUnreadKeys);
+          }
+
+          commitPanelState(spamDataset.data, spamDataset.count, spamDataset.data.length, queryToken, {
+            defer: background || silent,
+          });
+          return;
+        }
+
         const params = {
           limit: PAGE_SIZE,
           offset: freshOffset,
@@ -3052,7 +4375,15 @@ function MailsPanel({
         }
       }
     },
-    [address, commitPanelState, kind, readStateScope, readStateViewKey]
+    [
+      address,
+      blockedSenders,
+      commitPanelState,
+      isSpamView,
+      kind,
+      readStateScope,
+      readStateViewKey,
+    ]
   );
 
   const loadSearchDataset = useCallback(
@@ -3066,13 +4397,39 @@ function MailsPanel({
         setIsLoading(true);
       }
       try {
-        const cached = adminMailSearchDatasetCache.get(kind);
+        const cached = adminMailSearchDatasetCache.get(panelCacheKind);
         if (
           !refresh &&
           cached &&
           Date.now() - cached.fetchedAt < SEARCH_DATASET_TTL
         ) {
           commitPanelState(cached.data, cached.count, cached.data.length, "__search__", {
+            defer: background || silent,
+          });
+          return;
+        }
+
+        if (isSpamView) {
+          const spamDataset = await fetchAdminSpamMailboxDataset(blockedSenders);
+          if (requestId !== requestIdRef.current) return;
+
+          if (readStateScope.trim()) {
+            const nextUnreadKeys = await reconcileAdminMailReadState({
+              workerUrl: readStateScope,
+              viewKey: readStateViewKey,
+              mails: spamDataset.data,
+              allowMarkUnread: true,
+            });
+            if (requestId !== requestIdRef.current) return;
+            setUnreadMailKeys(nextUnreadKeys);
+          }
+
+          adminMailSearchDatasetCache.set(panelCacheKind, {
+            count: spamDataset.count,
+            data: spamDataset.data,
+            fetchedAt: Date.now(),
+          });
+          commitPanelState(spamDataset.data, spamDataset.count, spamDataset.data.length, "__search__", {
             defer: background || silent,
           });
           return;
@@ -3122,7 +4479,7 @@ function MailsPanel({
           setUnreadMailKeys(nextUnreadKeys);
         }
 
-        adminMailSearchDatasetCache.set(kind, {
+        adminMailSearchDatasetCache.set(panelCacheKind, {
           count: totalCount,
           data: mergedData,
           fetchedAt: Date.now(),
@@ -3143,7 +4500,15 @@ function MailsPanel({
         }
       }
     },
-    [commitPanelState, kind, readStateScope, readStateViewKey]
+    [
+      blockedSenders,
+      commitPanelState,
+      isSpamView,
+      kind,
+      panelCacheKind,
+      readStateScope,
+      readStateViewKey,
+    ]
   );
 
   useEffect(() => {
@@ -3152,10 +4517,11 @@ function MailsPanel({
     const trimmed = address.trim();
     const hydrated = !trimmed ? hydrateCachedPanel() : false;
     const panelCache = !trimmed
-      ? adminMailPanelCache.get(buildAdminMailCacheKey(kind, ""))
+      ? adminMailPanelCache.get(buildAdminMailCacheKey(panelCacheKind, ""))
       : undefined;
     const shouldRefresh =
       trimmed ||
+      isSpamView ||
       !panelCache ||
       Date.now() - panelCache.fetchedAt > ADMIN_PANEL_STALE_TTL;
 
@@ -3192,7 +4558,17 @@ function MailsPanel({
     } else if (shouldRefresh) {
       void load(0, "", { background: true });
     }
-  }, [address, hydrateCachedPanel, isActive, kind, load, loadSearchDataset, shouldWarm]);
+  }, [
+    address,
+    hydrateCachedPanel,
+    isActive,
+    isSpamView,
+    kind,
+    load,
+    loadSearchDataset,
+    panelCacheKind,
+    shouldWarm,
+  ]);
 
   useEffect(() => {
     if (!isActive || !hasActivatedRef.current) return;
@@ -3216,27 +4592,110 @@ function MailsPanel({
     const trimmed = address.trim();
     const timer = setTimeout(() => {
       if (trimmed) {
-        const cached = adminMailSearchDatasetCache.get(kind);
+        const cached = adminMailSearchDatasetCache.get(panelCacheKind);
         if (!cached || Date.now() - cached.fetchedAt > SEARCH_DATASET_TTL) {
           void loadSearchDataset(false, dataRef.current.length > 0 ? { background: true } : undefined);
         }
       }
     }, LIVE_SEARCH_DEBOUNCE);
     return () => clearTimeout(timer);
-  }, [address, isActive, kind, loadSearchDataset]);
+  }, [address, isActive, loadSearchDataset, panelCacheKind]);
 
   const closeMailFilterMenu = useCallback(() => {
     setShowMailGroupFilterMenu(false);
     setMailFilterMenuFrame(null);
   }, []);
 
+  const closeMailboxViewMenu = useCallback(() => {
+    setShowMailboxViewMenu(false);
+    setMailboxViewMenuFrame(null);
+  }, []);
+
+  const closeMailActionMenu = useCallback(() => {
+    setMailActionMenu(null);
+  }, []);
+
+  const openMailActionMenu = useCallback(
+    (event: GestureResponderEvent, items: FloatingActionMenuItem[]) => {
+      closeMailFilterMenu();
+      closeMailboxViewMenu();
+
+      const pageX = event.nativeEvent.pageX;
+      const pageY = event.nativeEvent.pageY;
+      const rootNode = mailPanelRootRef.current;
+
+      if (!rootNode) {
+        setMailActionMenu({ anchor: { x: pageX, y: pageY }, items });
+        return;
+      }
+
+      rootNode.measureInWindow((rootX, rootY) => {
+        setMailActionMenu({
+          anchor: { x: pageX - rootX, y: pageY - rootY },
+          items,
+        });
+      });
+    },
+    [closeMailFilterMenu, closeMailboxViewMenu]
+  );
+
+  const toggleMailboxViewMenu = useCallback(() => {
+    if (!supportsSpamToggle) return;
+
+    closeMailActionMenu();
+
+    if (showMailboxViewMenu) {
+      closeMailboxViewMenu();
+      return;
+    }
+
+    closeMailFilterMenu();
+
+    const rootNode = mailPanelRootRef.current;
+    const triggerNode = mailboxViewTriggerRef.current;
+
+    if (!rootNode || !triggerNode) {
+      setMailboxViewMenuFrame({ top: 74, left: 16, width: 136 });
+      setShowMailboxViewMenu(true);
+      return;
+    }
+
+    rootNode.measureInWindow((rootX, rootY, rootWidth) => {
+      triggerNode.measureInWindow((triggerX, triggerY, triggerWidth, triggerHeight) => {
+        const width = Math.max(124, Math.min(rootWidth - 32, 148));
+        const triggerCenter = triggerX - rootX + triggerWidth / 2;
+        const left = Math.max(
+          16,
+          Math.min(triggerCenter - width / 2, rootWidth - width - 16)
+        );
+
+        setMailboxViewMenuFrame({
+          top: triggerY - rootY + triggerHeight + 6,
+          left,
+          width,
+        });
+        setShowMailboxViewMenu(true);
+      });
+    });
+  }, [
+    closeMailFilterMenu,
+    closeMailActionMenu,
+    closeMailboxViewMenu,
+    showMailboxViewMenu,
+    supportsSpamToggle,
+  ]);
+
   const toggleMailFilterMenu = useCallback(() => {
     if (!supportsMailGroupFilter) return;
+
+    closeMailActionMenu();
 
     if (showMailGroupFilterMenu) {
       closeMailFilterMenu();
       return;
     }
+
+    closeMailboxViewMenu();
 
     const rootNode = mailPanelRootRef.current;
     const triggerNode = mailFilterTriggerRef.current;
@@ -3264,10 +4723,18 @@ function MailsPanel({
         setShowMailGroupFilterMenu(true);
       });
     });
-  }, [closeMailFilterMenu, showMailGroupFilterMenu, supportsMailGroupFilter]);
+  }, [
+    closeMailboxViewMenu,
+    closeMailActionMenu,
+    closeMailFilterMenu,
+    showMailGroupFilterMenu,
+    supportsMailGroupFilter,
+  ]);
 
   const handleRunSearch = useCallback(() => {
     closeMailFilterMenu();
+    closeMailboxViewMenu();
+    closeMailActionMenu();
     if (address.trim()) {
       void loadSearchDataset(
         true,
@@ -3276,13 +4743,15 @@ function MailsPanel({
     } else {
       void load(0, "");
     }
-  }, [address, closeMailFilterMenu, load, loadSearchDataset]);
+  }, [address, closeMailActionMenu, closeMailboxViewMenu, closeMailFilterMenu, load, loadSearchDataset]);
 
   const handleClearSearch = useCallback(() => {
     closeMailFilterMenu();
+    closeMailboxViewMenu();
+    closeMailActionMenu();
     setAddress("");
     void load(0, "");
-  }, [closeMailFilterMenu, load]);
+  }, [closeMailActionMenu, closeMailboxViewMenu, closeMailFilterMenu, load]);
 
   const markMailReadLocally = useCallback(
     (mail: ParsedMail) => {
@@ -3302,8 +4771,10 @@ function MailsPanel({
   const handleOpenMail = useCallback(
     (mail: ParsedMail) => {
       markMailReadLocally(mail);
-      const cacheKey = `${kind}-${mail.id}-${mail.ownerAddress || "global"}`;
-      setAdminMailEntry(cacheKey, { mail, kind });
+      const entryKind =
+        mail.mailboxKind === "unknown" && kind !== "sendbox" ? "unknown" : kind;
+      const cacheKey = `${entryKind}-${mail.id}-${mail.ownerAddress || "global"}`;
+      setAdminMailEntry(cacheKey, { mail, kind: entryKind });
       router.push({
         pathname: "/admin-mail-detail",
         params: { cacheKey },
@@ -3321,6 +4792,76 @@ function MailsPanel({
       Alert.alert("复制失败", code);
     }
   }, [markMailReadLocally, onMiniToast]);
+
+  const handleMarkAllRead = useCallback(async () => {
+    if (kind === "sendbox" || !readStateScope.trim()) return;
+    try {
+      setUnreadMailKeys(new Set());
+      await markAllAdminMailsRead(readStateScope);
+      onMiniToast("已全部标记已读");
+    } catch (err: any) {
+      Alert.alert("操作失败", err?.message || "标记已读失败");
+    }
+  }, [kind, onMiniToast, readStateScope]);
+
+  const handleBlockSender = useCallback(
+    (mail: ParsedMail) => {
+      const sender = getAdminMailSpamSender(mail);
+      if (!sender || !readStateScope.trim()) {
+        Alert.alert("无法拒收", "这封邮件没有可识别的发件邮箱地址。");
+        return;
+      }
+
+      Alert.alert("拒收发件人", `以后来自 ${sender} 的邮件会进入垃圾信箱。`, [
+        { text: "取消", style: "cancel" },
+        {
+          text: "拒收",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await blockAdminMailSender(readStateScope, mail);
+              markMailReadLocally(mail);
+              clearAdminMailCacheKinds(["inbox", "unknown", "spam"]);
+              onMiniToast("已加入垃圾信箱");
+            } catch (err: any) {
+              Alert.alert("操作失败", err?.message || "拒收失败");
+            }
+          },
+        },
+      ]);
+    },
+    [markMailReadLocally, onMiniToast, readStateScope]
+  );
+
+  const handleUnblockSender = useCallback(
+    async (mail: ParsedMail) => {
+      const sender = getAdminMailSpamSender(mail);
+      if (!sender || !readStateScope.trim()) return;
+      try {
+        await unblockAdminMailSender(readStateScope, sender);
+        clearAdminMailCacheKinds(["inbox", "unknown", "spam"]);
+        onMiniToast("已取消拒收");
+      } catch (err: any) {
+        Alert.alert("操作失败", err?.message || "取消拒收失败");
+      }
+    },
+    [onMiniToast, readStateScope]
+  );
+
+  const handleSwitchInboxMailboxView = useCallback(
+    (nextView: InboxMailboxView) => {
+      closeMailFilterMenu();
+      closeMailboxViewMenu();
+      closeMailActionMenu();
+      if (nextView === inboxMailboxView) return;
+      setInboxMailboxView(nextView);
+      setAddress("");
+      requestIdRef.current += 1;
+      queryRef.current = "";
+      liveSearchReadyRef.current = false;
+    },
+    [closeMailActionMenu, closeMailboxViewMenu, closeMailFilterMenu, inboxMailboxView]
+  );
 
   const handleDelete = useCallback((mail: ParsedMail) => {
     Alert.alert("删除邮件", mail.subject || "(无主题)", [
@@ -3352,6 +4893,60 @@ function MailsPanel({
     ]);
   }, [clearKindCaches, commitPanelState, kind, markMailReadLocally]);
 
+  const handleMailLongPress = useCallback(
+    (mail: ParsedMail, event: GestureResponderEvent) => {
+      if (kind === "sendbox") {
+        openMailActionMenu(event, [
+          {
+            key: "delete",
+            label: "删除邮件",
+            subtitle: "从发件箱移除",
+            icon: "trash.fill",
+            destructive: true,
+            onPress: () => handleDelete(mail),
+          },
+        ]);
+        return;
+      }
+
+      const sender = getAdminMailSpamSender(mail);
+      const items: FloatingActionMenuItem[] = [];
+
+      if (sender) {
+        items.push(
+          isSpamView
+            ? {
+                key: "unblock",
+                label: "取消拒收",
+                subtitle: sender,
+                icon: "checkmark.circle.fill",
+                onPress: () => void handleUnblockSender(mail),
+              }
+            : {
+                key: "block",
+                label: "拒收该发件人",
+                subtitle: sender,
+                icon: "xmark.circle.fill",
+                destructive: true,
+                onPress: () => handleBlockSender(mail),
+              }
+        );
+      }
+
+      items.push({
+          key: "delete",
+          label: "删除邮件",
+          subtitle: "从列表中移除",
+          icon: "trash.fill",
+          destructive: true,
+          onPress: () => handleDelete(mail),
+      });
+
+      openMailActionMenu(event, items);
+    },
+    [handleBlockSender, handleDelete, handleUnblockSender, isSpamView, kind, openMailActionMenu]
+  );
+
   const markUnknownAddressCreated = useCallback((targetAddress: string) => {
     const normalized = normalizeGroupAddress(targetAddress);
     if (!normalized) return;
@@ -3361,7 +4956,7 @@ function MailsPanel({
   }, []);
 
   const refreshAfterUnknownCreate = useCallback(async () => {
-    adminAddressesPanelCache.clear();
+    clearAdminAddressesPanelCache();
     adminStatsPanelCache = null;
     clearKindCaches();
     if (address.trim()) {
@@ -3388,11 +4983,13 @@ function MailsPanel({
           enablePrefix: false,
           enableRandomSubdomain: false,
         });
+        clearAdminAddressesPanelCache();
         markUnknownAddressCreated(targetAddress);
         onMiniToast(`已创建 ${targetAddress}`);
         await refreshAfterUnknownCreate();
       } catch (err: any) {
         if (isAddressAlreadyExistsError(err)) {
+          clearAdminAddressesPanelCache();
           markUnknownAddressCreated(targetAddress);
           onMiniToast(`已创建 ${targetAddress}`);
           await refreshAfterUnknownCreate();
@@ -3423,7 +5020,7 @@ function MailsPanel({
           creatingAddress={creatingAddress}
           isUnread={isUnread}
           onOpen={handleOpenMail}
-          onDelete={handleDelete}
+          onLongPress={handleMailLongPress}
           onCopyCode={handleCopyCode}
           onCreateAddressFromUnknown={handleCreateAddressFromUnknown}
         />
@@ -3437,8 +5034,8 @@ function MailsPanel({
       deferredAddress,
       handleCopyCode,
       handleCreateAddressFromUnknown,
-      handleDelete,
       handleOpenMail,
+      handleMailLongPress,
       highlightStyle,
       kind,
       unreadMailKeys,
@@ -3446,7 +5043,13 @@ function MailsPanel({
   );
 
   const emptyConfig =
-    kind === "sendbox"
+    isSpamView
+      ? {
+          icon: "xmark.circle.fill" as const,
+          title: "垃圾信箱为空",
+          subtitle: "拒收发件人后，命中的收件和未知邮件会显示在这里。",
+        }
+      : kind === "sendbox"
       ? {
           icon: "paperplane.fill" as const,
           title: "暂无管理员发件",
@@ -3463,13 +5066,17 @@ function MailsPanel({
             title: "暂无管理员收件",
             subtitle: "可以按地址过滤，查看系统中的所有收件邮件。",
           };
-  const summaryText = address.trim()
-    ? `匹配 ${visibleData.length} 封`
-    : supportsMailGroupFilter && mailGroupFilter === "ungrouped"
-      ? `未分组 ${visibleData.length} 封`
-      : supportsMailGroupFilter && mailGroupFilter !== "all"
-        ? `${mailGroupFilterLabel} ${visibleData.length} 封`
-        : `共 ${count} 封`;
+  const summaryText = isSpamView
+    ? address.trim()
+      ? `垃圾匹配 ${visibleData.length} 封`
+      : `共 ${visibleData.length} 封`
+    : address.trim()
+      ? `匹配 ${visibleData.length} 封`
+      : supportsMailGroupFilter && mailGroupFilter === "ungrouped"
+        ? `未分组 ${visibleData.length} 封`
+        : supportsMailGroupFilter && mailGroupFilter !== "all"
+          ? `${mailGroupFilterLabel} ${visibleData.length} 封`
+          : `共 ${count} 封`;
 
   return (
     <View ref={mailPanelRootRef} collapsable={false} style={{ flex: 1 }}>
@@ -3558,11 +5165,59 @@ function MailsPanel({
 
         <MailPanelStatusBar
           colors={colors}
-          title={kind === "sendbox" ? "发件箱" : kind === "unknown" ? "未知" : "收件箱"}
+          title={
+            isSpamView
+              ? "垃圾信箱"
+              : kind === "sendbox"
+                ? "发件箱"
+                : kind === "unknown"
+                  ? "未知"
+                  : "收件箱"
+          }
           summary={summaryText}
           isSyncing={isSyncing || isLoading}
+          canMarkAllRead={kind !== "sendbox"}
+          hasUnread={unreadMailKeys.size > 0}
+          onMarkAllRead={handleMarkAllRead}
+          onTitlePress={supportsSpamToggle ? toggleMailboxViewMenu : undefined}
+          titleTriggerRef={mailboxViewTriggerRef}
+          titleIsSwitch={supportsSpamToggle}
+          titleDropdownOpen={showMailboxViewMenu}
         />
       </View>
+      {supportsSpamToggle && showMailboxViewMenu ? (
+        <View pointerEvents="box-none" style={styles.mailFilterLayer}>
+          <Pressable style={styles.mailFilterBackdrop} onPress={closeMailboxViewMenu} />
+          <Animated.View
+            entering={FadeIn.duration(80)}
+            exiting={FadeOut.duration(60)}
+            style={[
+              styles.mailboxViewPopover,
+              {
+                top: mailboxViewMenuFrame?.top ?? 0,
+                left: mailboxViewMenuFrame?.left ?? 16,
+                width: mailboxViewMenuFrame?.width ?? 136,
+                backgroundColor: colors.surface,
+                borderColor: colors.border,
+                shadowColor: "#000000",
+              },
+            ]}
+          >
+            <MailboxViewMenuOption
+              colors={colors}
+              label="收件箱"
+              selected={inboxMailboxView === "inbox"}
+              onPress={() => handleSwitchInboxMailboxView("inbox")}
+            />
+            <MailboxViewMenuOption
+              colors={colors}
+              label="垃圾信箱"
+              selected={inboxMailboxView === "spam"}
+              onPress={() => handleSwitchInboxMailboxView("spam")}
+            />
+          </Animated.View>
+        </View>
+      ) : null}
       {supportsMailGroupFilter && showMailGroupFilterMenu ? (
         <View pointerEvents="box-none" style={styles.mailFilterLayer}>
           <Pressable style={styles.mailFilterBackdrop} onPress={closeMailFilterMenu} />
@@ -3588,9 +5243,16 @@ function MailsPanel({
           </View>
         </View>
       ) : null}
+      <FloatingActionMenu
+        visible={!!mailActionMenu}
+        anchor={mailActionMenu?.anchor ?? null}
+        colors={colors}
+        items={mailActionMenu?.items ?? []}
+        onClose={closeMailActionMenu}
+      />
       <FlatList
         data={visibleData}
-        keyExtractor={(item) => `${kind}-${item.id}`}
+        keyExtractor={(item) => `${item.mailboxKind || kind}-${item.id}`}
         removeClippedSubviews
         initialNumToRender={8}
         maxToRenderPerBatch={6}
@@ -3660,11 +5322,314 @@ function MailsPanel({
 
 // ─── Send As (admin) ──────────────────────────────────────────
 type AdminPalette = ReturnType<typeof useColors>;
-type AddressListItemData = AdminAddress & { groups?: AddressGroup[] };
 
 const AddressItemSeparator = React.memo(function AddressItemSeparator() {
   return <View style={styles.addressItemSeparator} />;
 });
+
+function AddressBulkActionModal({
+  visible,
+  colors,
+  state,
+  groups,
+  selectedCount,
+  fallbackScopeCount,
+  onClose,
+  onPreview,
+  onExecute,
+}: {
+  visible: boolean;
+  colors: AdminPalette;
+  state: AddressBulkModalState;
+  groups: AddressGroup[];
+  selectedCount: number;
+  fallbackScopeCount: number;
+  onClose: () => void;
+  onPreview: (action: AddressBulkActionKind, group?: AddressGroup) => void;
+  onExecute: () => void;
+}) {
+  const actionLabel = state.action ? getAddressBulkActionLabel(state.action) : "批量操作";
+  const preview = state.preview;
+  const affectedAddressCount =
+    preview?.address_count ?? state.addresses.length;
+  const progressTotal = state.addresses.length || affectedAddressCount || 0;
+  const progressDone = state.progressDone ?? 0;
+  const failures = state.failures || state.result?.failures || [];
+  const scopeText =
+    selectedCount > 0
+      ? `当前已选 ${selectedCount} 个地址`
+      : `未手动选择时，将按当前筛选范围 ${fallbackScopeCount} 个地址预览`;
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.bulkModalOverlay}>
+        <Pressable style={styles.bulkModalBackdrop} onPress={onClose} />
+        <View
+          style={[
+            styles.bulkModalCard,
+            { backgroundColor: colors.background, borderColor: colors.border },
+          ]}
+        >
+          <View style={styles.bulkModalHeader}>
+            <View style={styles.bulkModalHeaderCopy}>
+              <Text style={[styles.bulkModalTitle, { color: colors.foreground }]}>
+                {state.mode === "actions" ? "批量管理地址" : actionLabel}
+              </Text>
+              <Text style={[styles.bulkModalSubtitle, { color: colors.muted }]}>
+                {state.mode === "actions"
+                  ? scopeText
+                  : state.mode === "groupPicker"
+                    ? "选择要批量加入或移出的本地分组。"
+                    : "请先核对影响范围，再执行。"}
+              </Text>
+            </View>
+            <Pressable hitSlop={COMPACT_HIT_SLOP} onPress={onClose}>
+              <IconSymbol name="xmark.circle.fill" size={24} color={colors.muted} />
+            </Pressable>
+          </View>
+
+          {state.mode === "actions" ? (
+            <View style={styles.bulkActionList}>
+              {ADDRESS_BULK_ACTIONS.map((item) => {
+                const tint = item.destructive ? colors.error : colors.primary;
+                return (
+                  <Pressable
+                    key={item.action}
+                    onPress={() => onPreview(item.action)}
+                    style={({ pressed }) => [
+                      styles.bulkActionItem,
+                      {
+                        backgroundColor: pressed ? `${tint}10` : colors.surface,
+                        borderColor: item.destructive ? `${colors.error}22` : colors.border,
+                        opacity: pressed ? 0.82 : 1,
+                      },
+                    ]}
+                  >
+                    <View
+                      style={[
+                        styles.bulkActionIcon,
+                        { backgroundColor: `${tint}12` },
+                      ]}
+                    >
+                      <IconSymbol name={item.icon} size={16} color={tint} />
+                    </View>
+                    <View style={styles.bulkActionCopy}>
+                      <Text style={[styles.bulkActionLabel, { color: tint }]}>
+                        {item.label}
+                      </Text>
+                      <Text style={[styles.bulkActionSubtitle, { color: colors.muted }]}>
+                        {item.subtitle}
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+
+          {state.mode === "groupPicker" && state.action ? (
+            <ScrollView
+              style={styles.bulkGroupPickerScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {groups.map((group) => (
+                <Pressable
+                  key={group.id}
+                  onPress={() => onPreview(state.action!, group)}
+                  style={({ pressed }) => [
+                    styles.bulkActionItem,
+                    {
+                      backgroundColor: pressed ? `${colors.primary}10` : colors.surface,
+                      borderColor: colors.border,
+                      opacity: pressed ? 0.82 : 1,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.bulkActionIcon,
+                      { backgroundColor: `${group.color || colors.primary}18` },
+                    ]}
+                  >
+                    <IconSymbol
+                      name="checkmark.circle.fill"
+                      size={16}
+                      color={group.color || colors.primary}
+                    />
+                  </View>
+                  <View style={styles.bulkActionCopy}>
+                    <Text style={[styles.bulkActionLabel, { color: colors.foreground }]}>
+                      {group.name}
+                    </Text>
+                    <Text style={[styles.bulkActionSubtitle, { color: colors.muted }]}>
+                      {state.action === "add_group" ? "加入此分组" : "从此分组移出"}
+                    </Text>
+                  </View>
+                </Pressable>
+              ))}
+            </ScrollView>
+          ) : null}
+
+          {state.mode === "preview" ? (
+            <View style={styles.bulkPreviewBox}>
+              {preview ? (
+                <>
+                  <View style={styles.bulkPreviewGrid}>
+                    <BulkPreviewMetric
+                      colors={colors}
+                      label="地址"
+                      value={affectedAddressCount}
+                    />
+                    <BulkPreviewMetric
+                      colors={colors}
+                      label="收件"
+                      value={preview.mail_count ?? 0}
+                    />
+                    <BulkPreviewMetric
+                      colors={colors}
+                      label="发件"
+                      value={preview.send_count ?? 0}
+                    />
+                    <BulkPreviewMetric
+                      colors={colors}
+                      label="空邮箱"
+                      value={preview.empty_address_count ?? 0}
+                    />
+                  </View>
+                  <Text style={[styles.bulkPreviewSampleTitle, { color: colors.muted }]}>
+                    {state.targetGroup ? `目标分组：${state.targetGroup.name}` : "示例地址"}
+                  </Text>
+                  {state.targetGroup ? (
+                    <Text style={[styles.bulkPreviewSampleTitle, { color: colors.muted }]}>
+                      示例地址
+                    </Text>
+                  ) : null}
+                  <Text
+                    numberOfLines={3}
+                    style={[styles.bulkPreviewSampleText, { color: colors.foreground }]}
+                  >
+                    {(preview.sample_addresses || state.addresses.slice(0, 5).map((item) => item.name)).join(
+                      "\n"
+                    )}
+                  </Text>
+                  {state.error ? (
+                    <Text style={[styles.bulkPreviewError, { color: colors.error }]}>
+                      {state.error}
+                    </Text>
+                  ) : null}
+                  <View style={styles.bulkModalActions}>
+                    <Pressable
+                      onPress={() =>
+                        onPreview(state.action || "clear_inbox")
+                      }
+                      style={({ pressed }) => [
+                        styles.ghostActionButton,
+                        {
+                          backgroundColor: colors.surface,
+                          borderColor: colors.border,
+                          opacity: pressed ? 0.72 : 1,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.ghostActionText, { color: colors.muted }]}>
+                        重新预览
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={onExecute}
+                      style={({ pressed }) => [
+                        styles.primaryActionButton,
+                        {
+                          backgroundColor: colors.error,
+                          opacity: pressed ? 0.82 : 1,
+                        },
+                      ]}
+                    >
+                      <Text style={styles.primaryActionText}>确认执行</Text>
+                    </Pressable>
+                  </View>
+                </>
+              ) : (
+                <View style={styles.bulkModalLoading}>
+                  <ActivityIndicator color={colors.primary} />
+                  <Text style={[styles.bulkModalSubtitle, { color: colors.muted }]}>
+                    正在生成影响预览…
+                  </Text>
+                </View>
+              )}
+            </View>
+          ) : null}
+
+          {state.mode === "executing" ? (
+            <View style={styles.bulkModalLoading}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={[styles.bulkModalTitle, { color: colors.foreground }]}>
+                正在执行 {progressDone}/{progressTotal}
+              </Text>
+              <Text style={[styles.bulkModalSubtitle, { color: colors.muted }]}>
+                执行中会保留失败明细，成功项不会回滚。
+              </Text>
+            </View>
+          ) : null}
+
+          {state.mode === "done" ? (
+            <View style={styles.bulkPreviewBox}>
+              <Text style={[styles.bulkModalTitle, { color: colors.foreground }]}>
+                操作完成
+              </Text>
+              <Text style={[styles.bulkModalSubtitle, { color: colors.muted }]}>
+                成功 {state.result?.success_count ?? Math.max(0, progressTotal - failures.length)} 项
+                {failures.length > 0 ? `，失败 ${failures.length} 项` : ""}
+              </Text>
+              {failures.length > 0 ? (
+                <Text
+                  numberOfLines={4}
+                  style={[styles.bulkPreviewError, { color: colors.error }]}
+                >
+                  {failures
+                    .slice(0, 4)
+                    .map((item) => `${item.address || item.id || "未知地址"}：${item.error || "失败"}`)
+                    .join("\n")}
+                </Text>
+              ) : null}
+              <Pressable
+                onPress={onClose}
+                style={({ pressed }) => [
+                  styles.createButton,
+                  { backgroundColor: colors.primary, opacity: pressed ? 0.82 : 1 },
+                ]}
+              >
+                <Text style={styles.createButtonText}>完成</Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function BulkPreviewMetric({
+  colors,
+  label,
+  value,
+}: {
+  colors: AdminPalette;
+  label: string;
+  value: number;
+}) {
+  return (
+    <View style={[styles.bulkPreviewMetric, { backgroundColor: colors.surface }]}>
+      <Text style={[styles.bulkPreviewMetricValue, { color: colors.primary }]}>
+        {value}
+      </Text>
+      <Text style={[styles.bulkPreviewMetricLabel, { color: colors.muted }]}>
+        {label}
+      </Text>
+    </View>
+  );
+}
 
 const AddressListItem = React.memo(function AddressListItem({
   item,
@@ -3676,6 +5641,10 @@ const AddressListItem = React.memo(function AddressListItem({
   onShowCredential,
   onClearInbox,
   onDelete,
+  selectionMode = false,
+  selected = false,
+  onToggleSelect,
+  onLongPress,
 }: {
   item: AddressListItemData;
   colors: AdminPalette;
@@ -3686,6 +5655,10 @@ const AddressListItem = React.memo(function AddressListItem({
   onShowCredential: (item: AdminAddress) => void;
   onClearInbox: (item: AdminAddress) => void;
   onDelete: (item: AdminAddress) => void;
+  selectionMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (item: AdminAddress) => void;
+  onLongPress?: (item: AdminAddress) => void;
 }) {
   const updatedText = useMemo(
     () =>
@@ -3702,16 +5675,33 @@ const AddressListItem = React.memo(function AddressListItem({
 
   return (
     <Pressable
-      onPress={() => onOpen(item)}
+      onPress={() => (selectionMode ? onToggleSelect?.(item) : onOpen(item))}
+      onLongPress={() => onLongPress?.(item)}
+      delayLongPress={360}
       style={[
         styles.addressCompactCard,
         {
-          backgroundColor: colors.surface,
-          borderColor: colors.border,
+          backgroundColor: selected ? `${colors.primary}10` : colors.surface,
+          borderColor: selected ? `${colors.primary}38` : colors.border,
         },
       ]}
     >
       <View style={styles.addressCompactTop}>
+        {selectionMode ? (
+          <View
+            style={[
+              styles.addressSelectDot,
+              {
+                backgroundColor: selected ? colors.primary : "transparent",
+                borderColor: selected ? colors.primary : colors.border,
+              },
+            ]}
+          >
+            {selected ? (
+              <IconSymbol name="checkmark.circle.fill" size={16} color="#FFFFFF" />
+            ) : null}
+          </View>
+        ) : null}
         <View style={styles.addressCompactBody}>
           <View style={styles.addressCompactTitleRow}>
             <HighlightText
@@ -3753,6 +5743,7 @@ const AddressListItem = React.memo(function AddressListItem({
         </View>
       </View>
 
+      {!selectionMode ? (
       <View style={styles.addressCompactActions}>
         <Pressable
           onPress={(event) => {
@@ -3817,6 +5808,7 @@ const AddressListItem = React.memo(function AddressListItem({
           </Text>
         </Pressable>
       </View>
+      ) : null}
     </Pressable>
   );
 });
@@ -3832,12 +5824,12 @@ const MailListItem = React.memo(function MailListItem({
   creatingAddress,
   isUnread,
   onOpen,
-  onDelete,
+  onLongPress,
   onCopyCode,
   onCreateAddressFromUnknown,
 }: {
   item: ParsedMail;
-  kind: "inbox" | "sendbox" | "unknown";
+  kind: AdminMailPanelKind;
   colors: AdminPalette;
   searchQuery: string;
   metaQuery: string;
@@ -3846,7 +5838,7 @@ const MailListItem = React.memo(function MailListItem({
   creatingAddress: string | null;
   isUnread: boolean;
   onOpen: (mail: ParsedMail) => void;
-  onDelete: (mail: ParsedMail) => void;
+  onLongPress: (mail: ParsedMail, event: GestureResponderEvent) => void;
   onCopyCode: (mail: ParsedMail, code: string) => void;
   onCreateAddressFromUnknown: (mail: ParsedMail) => void;
 }) {
@@ -3884,7 +5876,7 @@ const MailListItem = React.memo(function MailListItem({
   return (
     <Pressable
       onPress={() => onOpen(item)}
-      onLongPress={() => onDelete(item)}
+      onLongPress={(event) => onLongPress(item, event)}
       delayLongPress={400}
       style={({ pressed }) => [
         styles.compactMailItem,
@@ -4421,31 +6413,205 @@ function MailPanelStatusBar({
   title,
   summary,
   isSyncing,
+  canMarkAllRead = false,
+  hasUnread = false,
+  onMarkAllRead,
+  onTitlePress,
+  titleTriggerRef,
+  titleIsSwitch = false,
+  titleDropdownOpen = false,
 }: {
   colors: ReturnType<typeof useColors>;
   title: string;
   summary: string;
   isSyncing: boolean;
+  canMarkAllRead?: boolean;
+  hasUnread?: boolean;
+  onMarkAllRead?: () => void;
+  onTitlePress?: () => void;
+  titleTriggerRef?: React.RefObject<React.ElementRef<typeof View> | null>;
+  titleIsSwitch?: boolean;
+  titleDropdownOpen?: boolean;
 }) {
   return (
     <View style={styles.mailToolbarSummary}>
       <View style={styles.mailToolbarInlineRow}>
-        <Text numberOfLines={1} style={styles.mailToolbarStatusLine}>
-          <Text style={{ color: colors.primary }}>{title}</Text>
-          <Text style={{ color: colors.border }}> · </Text>
-          <Text style={{ color: colors.muted }}>{summary}</Text>
-          {isSyncing ? (
-            <>
-              <Text style={{ color: colors.border }}> · </Text>
-              <Text style={{ color: colors.primary }}>更新中</Text>
-            </>
-          ) : null}
-        </Text>
+        <View style={styles.mailToolbarStatusWrap}>
+          {onTitlePress ? (
+            <View ref={titleTriggerRef} collapsable={false}>
+              <Pressable
+                hitSlop={COMPACT_HIT_SLOP}
+                onPress={onTitlePress}
+                style={({ pressed }) => [
+                  styles.mailToolbarTitleSwitch,
+                  {
+                    backgroundColor: titleDropdownOpen
+                      ? `${colors.primary}10`
+                      : "transparent",
+                    opacity: pressed ? 0.72 : 1,
+                  },
+                ]}
+              >
+                <Text
+                  numberOfLines={1}
+                  style={[styles.mailToolbarTitleSwitchText, { color: colors.primary }]}
+                >
+                  {title}
+                  {titleIsSwitch ? (titleDropdownOpen ? " ▴" : " ▾") : ""}
+                </Text>
+              </Pressable>
+            </View>
+          ) : (
+            <Text
+              numberOfLines={1}
+              style={[styles.mailToolbarTitleSwitchText, { color: colors.primary }]}
+            >
+              {title}
+            </Text>
+          )}
+          <Text numberOfLines={1} style={styles.mailToolbarStatusLine}>
+            <Text style={{ color: colors.border }}> · </Text>
+            <Text style={{ color: colors.muted }}>{summary}</Text>
+            {isSyncing ? (
+              <>
+                <Text style={{ color: colors.border }}> · </Text>
+                <Text style={{ color: colors.primary }}>更新中</Text>
+              </>
+            ) : null}
+          </Text>
+        </View>
         {isSyncing ? (
           <View style={[styles.mailInlineSyncDot, { backgroundColor: colors.primary }]} />
         ) : null}
+        {canMarkAllRead && onMarkAllRead ? (
+          <Pressable
+            disabled={!hasUnread}
+            hitSlop={COMPACT_HIT_SLOP}
+            onPress={onMarkAllRead}
+            style={({ pressed }) => [
+              styles.mailMarkAllReadButton,
+              {
+                backgroundColor: hasUnread ? `${colors.primary}12` : colors.background,
+                borderColor: hasUnread ? `${colors.primary}28` : colors.border,
+                opacity: !hasUnread ? 0.52 : pressed ? 0.72 : 1,
+              },
+            ]}
+          >
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.mailMarkAllReadText,
+                { color: hasUnread ? colors.primary : colors.muted },
+              ]}
+            >
+              全部已读
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
     </View>
+  );
+}
+
+function MailboxViewMenuOption({
+  colors,
+  label,
+  selected,
+  onPress,
+}: {
+  colors: ReturnType<typeof useColors>;
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      hitSlop={2}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.mailboxViewOption,
+        {
+          backgroundColor: selected
+            ? `${colors.primary}14`
+            : pressed
+              ? `${colors.primary}08`
+              : "transparent",
+          opacity: pressed ? 0.82 : 1,
+        },
+      ]}
+    >
+      <Text
+        numberOfLines={1}
+        style={[
+          styles.mailboxViewOptionText,
+          { color: selected ? colors.primary : colors.foreground },
+        ]}
+      >
+        {label}
+      </Text>
+      {selected ? (
+        <IconSymbol name="checkmark.circle.fill" size={15} color={colors.primary} />
+      ) : (
+        <View style={styles.mailboxViewOptionPlaceholder} />
+      )}
+    </Pressable>
+  );
+}
+
+function AddressUserFilterOption({
+  colors,
+  label,
+  subtitle,
+  selected,
+  onPress,
+}: {
+  colors: ReturnType<typeof useColors>;
+  label: string;
+  subtitle?: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      hitSlop={2}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.addressUserFilterOption,
+        {
+          backgroundColor: selected
+            ? `${colors.primary}14`
+            : pressed
+              ? `${colors.primary}08`
+              : "transparent",
+          opacity: pressed ? 0.82 : 1,
+        },
+      ]}
+    >
+      <View style={styles.addressUserFilterOptionText}>
+        <Text
+          numberOfLines={1}
+          style={[
+            styles.addressUserFilterOptionLabel,
+            { color: selected ? colors.primary : colors.foreground },
+          ]}
+        >
+          {label}
+        </Text>
+        {subtitle ? (
+          <Text
+            numberOfLines={1}
+            style={[styles.addressUserFilterOptionSubtitle, { color: colors.muted }]}
+          >
+            {subtitle}
+          </Text>
+        ) : null}
+      </View>
+      {selected ? (
+        <IconSymbol name="checkmark.circle.fill" size={15} color={colors.primary} />
+      ) : (
+        <View style={styles.mailboxViewOptionPlaceholder} />
+      )}
+    </Pressable>
   );
 }
 
@@ -4960,6 +7126,35 @@ const styles = StyleSheet.create({
     zIndex: 41,
     elevation: 18,
   },
+  mailboxViewPopover: {
+    position: "absolute",
+    zIndex: 42,
+    elevation: 20,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 5,
+    shadowOpacity: 0.14,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  mailboxViewOption: {
+    minHeight: 34,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  mailboxViewOptionText: {
+    flexShrink: 1,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  mailboxViewOptionPlaceholder: {
+    width: 15,
+    height: 15,
+  },
   groupFilterRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -4975,10 +7170,59 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  userFilterChip: {
+    maxWidth: 140,
+  },
   groupFilterChipText: {
     fontSize: 12,
     fontWeight: "700",
     textAlign: "center",
+  },
+  addressUserFilterPopover: {
+    position: "absolute",
+    zIndex: 42,
+    elevation: 20,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 5,
+    shadowOpacity: 0.14,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  addressUserFilterScroll: {
+    maxHeight: 268,
+  },
+  addressUserFilterOption: {
+    minHeight: 44,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  addressUserFilterOptionText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  addressUserFilterOptionLabel: {
+    fontSize: 12,
+    fontWeight: "800",
+    lineHeight: 16,
+  },
+  addressUserFilterOptionSubtitle: {
+    marginTop: 1,
+    fontSize: 10,
+    fontWeight: "600",
+    lineHeight: 13,
+  },
+  addressUserFilterEmpty: {
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: "600",
   },
   addressToolbarFooter: {
     flexDirection: "row",
@@ -5016,6 +7260,29 @@ const styles = StyleSheet.create({
     minHeight: 18,
     flexWrap: "nowrap",
   },
+  mailToolbarStatusWrap: {
+    minWidth: 0,
+    flexShrink: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    flexWrap: "nowrap",
+  },
+  mailToolbarTitleSwitch: {
+    minWidth: 0,
+    flexShrink: 0,
+    minHeight: 22,
+    borderRadius: 999,
+    paddingHorizontal: 4,
+    justifyContent: "center",
+  },
+  mailToolbarTitleSwitchText: {
+    minWidth: 0,
+    flexShrink: 0,
+    fontSize: 12,
+    fontWeight: "800",
+    lineHeight: 17,
+  },
   addressToolbarInlineRow: {
     minWidth: 0,
     flexDirection: "row",
@@ -5038,6 +7305,19 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     lineHeight: 17,
     textAlign: "center",
+  },
+  mailMarkAllReadButton: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    minHeight: 22,
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  mailMarkAllReadText: {
+    fontSize: 11,
+    fontWeight: "700",
   },
   mailInlineSyncDot: {
     width: 6,
@@ -5160,6 +7440,16 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 12,
+  },
+  addressSelectDot: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 2,
+    flexShrink: 0,
   },
   addressCompactBody: {
     flex: 1,
@@ -5603,6 +7893,138 @@ const styles = StyleSheet.create({
     marginTop: 6,
     textAlign: "center",
     lineHeight: 19,
+  },
+  bulkModalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    paddingHorizontal: 18,
+    backgroundColor: "rgba(15,23,42,0.28)",
+  },
+  bulkModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  bulkModalCard: {
+    borderWidth: 1,
+    borderRadius: 22,
+    padding: 16,
+    gap: 14,
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 22,
+  },
+  bulkModalHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  bulkModalHeaderCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  bulkModalTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    lineHeight: 23,
+  },
+  bulkModalSubtitle: {
+    marginTop: 3,
+    fontSize: 12,
+    fontWeight: "600",
+    lineHeight: 17,
+  },
+  bulkActionList: {
+    gap: 8,
+  },
+  bulkGroupPickerScroll: {
+    maxHeight: 280,
+  },
+  bulkActionItem: {
+    minHeight: 56,
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  bulkActionIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  bulkActionCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  bulkActionLabel: {
+    fontSize: 13,
+    fontWeight: "800",
+    lineHeight: 18,
+  },
+  bulkActionSubtitle: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: "600",
+    lineHeight: 15,
+  },
+  bulkPreviewBox: {
+    gap: 12,
+  },
+  bulkPreviewGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  bulkPreviewMetric: {
+    flexGrow: 1,
+    flexBasis: "45%",
+    minWidth: "45%",
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  bulkPreviewMetricValue: {
+    fontSize: 18,
+    fontWeight: "900",
+    lineHeight: 22,
+  },
+  bulkPreviewMetricLabel: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  bulkPreviewSampleTitle: {
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  bulkPreviewSampleText: {
+    fontSize: 12,
+    fontWeight: "600",
+    lineHeight: 18,
+  },
+  bulkPreviewError: {
+    fontSize: 12,
+    fontWeight: "700",
+    lineHeight: 17,
+  },
+  bulkModalActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  bulkModalLoading: {
+    minHeight: 128,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
   },
   modalOverlay: {
     flex: 1,

@@ -636,13 +636,73 @@ export interface AdminAddress {
   send_count?: number;
   created_at?: string;
   updated_at?: string;
-  user_id?: number;
+  user_id?: number | string;
+  user_name?: string;
+  user_email?: string;
+  username?: string;
   groups?: import("./address-groups").AddressGroup[];
 }
 
 export interface AdminAddressPage {
   results: AdminAddress[];
   count: number;
+  hasMore?: boolean;
+}
+
+export interface AdminUser {
+  id: number | string;
+  name?: string;
+  username?: string;
+  email?: string;
+  user_email?: string;
+  openId?: string;
+  openid?: string;
+  role_text?: string | null;
+  address_count?: number;
+  mail_count?: number;
+  send_count?: number;
+  [key: string]: unknown;
+}
+
+export interface AdminUserPage {
+  results: AdminUser[];
+  count: number;
+}
+
+export type AdminBulkAction =
+  | "delete_addresses"
+  | "clear_inbox"
+  | "clear_sent"
+  | "clear_all"
+  | "delete_empty";
+
+export interface AdminBulkRequest {
+  action: AdminBulkAction;
+  address_ids?: (number | string)[];
+  addresses?: string[];
+  filters?: {
+    query?: string;
+    user_id?: number | string;
+    group_id?: string;
+  };
+  confirm?: boolean;
+}
+
+export interface AdminBulkPreviewResponse {
+  action?: AdminBulkAction;
+  address_count?: number;
+  mail_count?: number;
+  send_count?: number;
+  empty_address_count?: number;
+  sample_addresses?: string[];
+  message?: string;
+  [key: string]: unknown;
+}
+
+export interface AdminBulkExecuteResponse extends AdminBulkPreviewResponse {
+  success_count?: number;
+  failed_count?: number;
+  failures?: { address?: string; id?: number | string; error?: string }[];
 }
 
 export interface AdminStatistics {
@@ -735,6 +795,7 @@ export async function fetchAdminAddresses(params: {
   limit?: number;
   offset?: number;
   query?: string;
+  userId?: number | string;
   sortBy?: string;
   sortOrder?: "asc" | "desc";
 }): Promise<AdminAddressPage> {
@@ -742,6 +803,9 @@ export async function fetchAdminAddresses(params: {
   qs.set("limit", String(params.limit ?? 50));
   qs.set("offset", String(params.offset ?? 0));
   if (params.query) qs.set("query", params.query);
+  if (params.userId !== undefined && params.userId !== null && String(params.userId) !== "all") {
+    qs.set("user_id", String(params.userId));
+  }
   if (params.sortBy) qs.set("sort_by", params.sortBy);
   if (params.sortOrder) qs.set("sort_order", params.sortOrder);
 
@@ -755,6 +819,120 @@ export async function fetchAdminAddresses(params: {
     results: Array.isArray(resp.results) ? resp.results : [],
     count: typeof resp.count === "number" ? resp.count : 0,
   };
+}
+
+/** Admin: list users with address/mail statistics when the Worker supports it. */
+export async function fetchAdminUsers(params: {
+  limit?: number;
+  offset?: number;
+  query?: string;
+} = {}): Promise<AdminUserPage> {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(params.limit ?? 100));
+  qs.set("offset", String(params.offset ?? 0));
+  if (params.query) qs.set("query", params.query);
+
+  const resp = await apiRequest<AdminUserPage | AdminUser[]>(
+    `/admin/users?${qs.toString()}`,
+    { adminAuth: true }
+  );
+  if (!resp) return { results: [], count: 0 };
+  if (Array.isArray(resp)) return { results: resp, count: resp.length };
+  return {
+    results: Array.isArray(resp.results) ? resp.results : [],
+    count: typeof resp.count === "number" ? resp.count : 0,
+  };
+}
+
+/** Admin: list addresses bound to a specific user, matching the web admin page.
+ * Current Workers return the complete bound list from this endpoint. The optional
+ * limit/offset are sent for forward compatibility and also applied client-side
+ * when an older Worker ignores them.
+ */
+export async function fetchAdminUserAddresses(
+  userId: number | string,
+  params: { limit?: number; offset?: number } = {}
+): Promise<AdminAddressPage> {
+  const encodedUserId = encodeURIComponent(String(userId));
+  const qs = new URLSearchParams();
+  if (params.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params.offset !== undefined) qs.set("offset", String(params.offset));
+  const query = qs.toString();
+  const resp = await apiRequest<AdminAddressPage | AdminAddress[]>(
+    `/admin/users/bind_address/${encodedUserId}${query ? `?${query}` : ""}`,
+    { adminAuth: true }
+  );
+  if (!resp) return { results: [], count: 0 };
+  const results = Array.isArray(resp)
+    ? resp
+    : Array.isArray(resp.results)
+      ? resp.results
+      : [];
+  const normalizedResults = results.map((item) => ({
+    ...item,
+    user_id: item.user_id ?? userId,
+  }));
+  const hasResponseCount = !Array.isArray(resp) && typeof resp.count === "number";
+  const limit = params.limit;
+  const offset = params.offset ?? 0;
+  const shouldApplyClientPaging =
+    typeof limit === "number" &&
+    limit > 0 &&
+    normalizedResults.length > limit;
+  const shouldClientPage =
+    shouldApplyClientPaging &&
+    normalizedResults.length > offset &&
+    (!hasResponseCount || normalizedResults.length > limit);
+  const pageResults = shouldClientPage
+    ? normalizedResults.slice(offset, offset + limit)
+    : normalizedResults;
+
+  let totalCount = hasResponseCount ? resp.count : normalizedResults.length;
+  let hasMore =
+    typeof totalCount === "number" && totalCount > 0
+      ? offset + pageResults.length < totalCount
+      : false;
+
+  if (!hasResponseCount && typeof limit === "number" && limit > 0) {
+    if (shouldApplyClientPaging) {
+      totalCount = normalizedResults.length;
+      hasMore = offset + pageResults.length < normalizedResults.length;
+    } else if (pageResults.length >= limit) {
+      totalCount = offset + pageResults.length + 1;
+      hasMore = true;
+    } else {
+      totalCount = offset + pageResults.length;
+      hasMore = false;
+    }
+  }
+
+  return {
+    results: pageResults,
+    count: totalCount,
+    hasMore,
+  };
+}
+
+/** Admin: ask the Worker to preview a destructive bulk operation. */
+export async function adminBulkPreview(
+  payload: AdminBulkRequest
+): Promise<AdminBulkPreviewResponse> {
+  return apiRequest<AdminBulkPreviewResponse>("/admin/bulk/preview", {
+    method: "POST",
+    adminAuth: true,
+    body: payload,
+  });
+}
+
+/** Admin: execute a confirmed bulk operation when the Worker supports it. */
+export async function adminBulkExecute(
+  payload: AdminBulkRequest
+): Promise<AdminBulkExecuteResponse> {
+  return apiRequest<AdminBulkExecuteResponse>("/admin/bulk/execute", {
+    method: "POST",
+    adminAuth: true,
+    body: payload,
+  });
 }
 
 /** Admin: list all inbox mails (optionally filtered by address). */

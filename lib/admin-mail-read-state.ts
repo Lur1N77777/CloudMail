@@ -387,6 +387,28 @@ export async function markAdminMailsRead(
   if (didChange) notifyReadStateChanged({ workerUrl, unreadKeys: unread });
 }
 
+export async function markAllAdminMailsRead(workerUrl: string) {
+  if (!workerUrl.trim()) return;
+  let didChange = false;
+
+  const unread = await mutateStore(workerUrl, (store) => {
+    const now = Date.now();
+
+    for (const entry of Object.values(store.entries)) {
+      if (entry.status !== "read" || !entry.explicitReadAt) {
+        entry.status = "read";
+        entry.explicitReadAt = now;
+        entry.updatedAt = now;
+        didChange = true;
+      }
+    }
+
+    return { changed: didChange, result: collectUnreadKeys(store) };
+  });
+
+  if (didChange) notifyReadStateChanged({ workerUrl, unreadKeys: unread });
+}
+
 export function subscribeAdminMailReadState(
   listener: (event: AdminMailReadStateEvent) => void
 ) {

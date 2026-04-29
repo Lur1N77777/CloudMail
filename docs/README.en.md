@@ -3,7 +3,7 @@
 
 # CloudMail
 
-**V1.0.12 · Mobile admin app for Cloudflare Temp Email systems**
+**V1.1.0 · Mobile admin app for Cloudflare Temp Email systems**
 
 [![CI](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml/badge.svg)](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
@@ -19,46 +19,52 @@
 
 ## What CloudMail is
 
-CloudMail is a mobile admin app for **Cloudflare Temp Email** systems. It is built with React Native / Expo and targets [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) and compatible APIs.
+CloudMail is an Android administrator app for **Cloudflare Temp Email** systems. It is built with Expo / React Native and targets [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) and compatible APIs.
 
-The upstream project provides the Cloudflare Worker mailbox backend and web experience. CloudMail adds an Android admin client around that ecosystem, with address management, inbox mail, sent mail, unknown-recipient mail, verification codes, local groups, and HTML email reading from a phone.
+The upstream project provides the Cloudflare Worker mailbox backend, web admin UI, and mail delivery features. CloudMail packages those capabilities into a phone-friendly admin client. It is not a new mailbox backend and it is not an official Cloudflare product; it is a mobile management app built around the `cloudflare_temp_email` ecosystem.
 
-CloudMail now opens directly into administrator setup or the admin console. The old public-user welcome flow is no longer the main entry point.
+CloudMail is **administrator-first**: first launch opens admin setup, and a valid configuration opens the admin console directly.
 
-## What's new in V1.0.12
+## What's new in V1.1.0
 
-- **New-mail unread dots**: incrementally refreshed inbox and unknown-recipient messages get a lightweight dot until they are opened, copied, or deleted.
-- **Synced read state**: matching messages share local read state across the inbox and unknown-recipient views.
-- **Verification-code copy feedback**: tapping a detected code now shows `验证码已复制` and marks the message as read locally.
-- **Stable group modals**: address group sheets use a centered, lightweight modal with keyboard-aware sizing, fixing the previous flicker when typing and tapping inside the card.
-- **More list space**: the admin address, inbox, sent, and unknown pages use a tighter toolbar layout so more message/address previews stay visible.
-- **Better compose typing**: the single-address compose panel keeps the body field and send controls reachable while the keyboard is open.
-- **Smoother swipe navigation**: admin swipes now move at most one page per gesture with a softer settle animation.
+V1.1.0 focuses on administrator management, large address collections, user filtering, batch operations, and spam-mailbox interactions.
+
+- **Admin user address view**: the app now uses the same backend endpoint as the web admin page, `/admin/users/bind_address/:user_id`, so selecting a user can show addresses bound to that user.
+- **Large address indexing**: group filtering and search are more complete for 800+ address datasets and no longer rely only on the currently loaded page.
+- **Batch address management**: selection mode, select-current-scope, delete addresses, clear inbox mail, clear sent mail, clear all mail, delete empty addresses, and local group add/remove are supported.
+- **Inbox-embedded spam mailbox**: the inbox title opens a compact dropdown for `Inbox / Spam`; blocked senders are stored locally by full sender address.
+- **Long-press action menus**: mail rows no longer show permanent block buttons. Long press opens a polished floating menu for blocking, unblocking, or deleting.
+- **Mark all read**: inbox, unknown-recipient mail, and spam views can clear local unread dots for the current Worker.
+- **Better floating UI**: dropdowns, long-press menus, and slider-like controls use a more consistent lightweight style instead of raw native popups.
+- **User-filter stability**: fixed stale requests overwriting the selected user view, cached old address lists, and stuck loading/refresh states.
+- **Mobile polish retained**: new-mail dots, verification-code copy feedback, OLED black theme, compact toolbars, and keyboard avoidance from V1.0.12 remain available.
 
 ## Highlights
 
-- **Cloudflare Temp Email mobile admin app**: connect to your `cloudflare_temp_email` compatible Worker/API and manage your mailbox system from a phone.
-- **Admin console**: manage statistics, addresses, inbox mail, sent mail, unknown-recipient mail, and sending from one place.
-- **Address management**: create custom addresses, random addresses, and subdomain addresses; view credentials, clear inboxes, and delete addresses.
-- **Inbox, sent mail, and unknown recipients**: browse normal mail, sent mail, and mail received by uncreated addresses; create unknown addresses with one tap.
-- **Fast verification-code handling**: detect common verification codes, copy them quickly, and get clear copy feedback.
+- **Cloudflare Temp Email mobile admin**: connect to your `cloudflare_temp_email` compatible Worker/API and manage temporary mailboxes from a phone.
+- **Admin console**: statistics, addresses, inbox mail, sent mail, unknown-recipient mail, and mail sending in one app.
+- **User-level management**: load admin users and view addresses bound to a selected user.
+- **Address management**: create custom, subdomain, and random-subdomain addresses; view credentials, clear inboxes, and delete addresses.
+- **Batch operations**: process the current filtered address scope with preview/confirmation for destructive actions.
+- **Local grouping**: group mailbox addresses locally and filter address or mail views by group.
+- **Inbox and spam mailbox**: switch between normal inbox and spam inside the inbox page; long-press mail to block or unblock a sender.
+- **Inbox, sent mail, and unknown recipients**: browse normal mail, sent mail, and mail sent to uncreated addresses; create unknown addresses with one tap.
+- **Fast verification-code handling**: detect common verification codes, copy them quickly, and show clear copy feedback.
 - **New-mail indicators**: historical mail stays quiet; newly refreshed messages get a local unread dot.
 - **HTML and text mail reading**: preview rich HTML email, plain text, source text, and message details.
-- **Local grouping**: group addresses locally and filter address or inbox views by group.
 - **Night-friendly themes**: light, dark, OLED black, and system themes are available; the dark quick toggle remembers your preferred dark variant.
-- **Fluid admin navigation**: top tabs and full-screen swipe gestures are tuned for mobile admin workflows.
-- **Self-host friendly**: keep your mailbox service under your own control; the mobile app only talks to your Worker/API.
+- **Self-host friendly**: keep your mailbox service under your own control; the app only talks to your Worker/API.
 
 ## Screenshots
 
 Click any thumbnail to open the full-size image.
 
-| Preview                                                                                                                                       | Description                                                                                                                                                                       |
-| --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <a href="./screenshots/admin-dashboard.jpg"><img src="./screenshots/admin-dashboard.jpg" width="220" alt="Admin dashboard" /></a>             | **Admin dashboard** — a compact overview of managed addresses, matched inbox mail, sent mail, and unknown-recipient messages, with quick refresh, top tabs, and swipe navigation. |
-| <a href="./screenshots/compose-mail.jpg"><img src="./screenshots/compose-mail.jpg" width="220" alt="Compose mail screen" /></a>               | **Compose mail** — send email from a selected mailbox identity with sender, recipient, subject, and content fields organized for mobile use.                                      |
-| <a href="./screenshots/settings-server.jpg"><img src="./screenshots/settings-server.jpg" width="220" alt="Server settings" /></a>             | **Admin settings** — configure the Worker endpoint, admin password, site password, and auto-refresh interval.                                                                     |
-| <a href="./screenshots/settings-appearance.jpg"><img src="./screenshots/settings-appearance.jpg" width="220" alt="Appearance settings" /></a> | **Appearance settings** — choose light, dark, OLED black, or system theme mode.                                                                                                   |
+| Preview                                                                                                                                       | Description                                                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| <a href="./screenshots/admin-dashboard.jpg"><img src="./screenshots/admin-dashboard.jpg" width="220" alt="Admin dashboard" /></a>             | **Admin dashboard** — a compact overview of managed addresses, matched inbox mail, sent mail, and unknown-recipient messages.                                 |
+| <a href="./screenshots/compose-mail.jpg"><img src="./screenshots/compose-mail.jpg" width="220" alt="Compose mail screen" /></a>               | **Compose mail** — send email from a selected mailbox identity with recipient, subject, and content fields organized for mobile use.                          |
+| <a href="./screenshots/settings-server.jpg"><img src="./screenshots/settings-server.jpg" width="220" alt="Server settings" /></a>             | **Admin settings** — configure the Worker endpoint, admin password, site password, and auto-refresh interval.                                                |
+| <a href="./screenshots/settings-appearance.jpg"><img src="./screenshots/settings-appearance.jpg" width="220" alt="Appearance settings" /></a> | **Appearance settings** — choose light, dark, OLED black, or system theme mode.                                                                               |
 
 ## Download
 
@@ -91,15 +97,17 @@ If you have not deployed the backend yet, follow the upstream [cloudflare_temp_e
 
 - Later launches open the admin console automatically if the saved configuration is still valid.
 - Tap **Settings** in the top-right corner of the admin console to edit Worker, password, refresh, and appearance settings.
-- Use the top tabs or full-screen left/right swipes to move between admin pages.
+- Use the top tabs to move between admin pages.
 - The theme quick toggle remembers your preferred dark variant. If you picked OLED black, switching from light back to dark returns to OLED black.
-- Newly refreshed mail shows a small dot until you open the detail page or copy a detected verification code.
+- Newly refreshed mail shows a small dot until you open the detail page, copy a detected verification code, or mark all as read.
+- In the inbox page, tap the title dropdown to switch between inbox and spam.
+- Long-press mail for actions; long-press addresses to enter batch selection mode.
 
 ### 4. Admin pages
 
 - **Stats**: view address, inbox, sent mail, and unknown-recipient counts.
-- **Addresses**: search, create, group, inspect credentials, clear inboxes, and delete mailbox addresses.
-- **Inbox**: view received mail, search, copy verification codes, see unread dots, and filter by local groups.
+- **Addresses**: search, create, group, filter by user, inspect credentials, clear inboxes, delete addresses, and batch manage mailboxes.
+- **Inbox**: view received mail, search, copy verification codes, see unread dots, use spam mailbox, and filter by local groups.
 - **Sent**: view sent mail records.
 - **Unknown**: view messages sent to addresses that have not been created yet, then create those addresses with one tap.
 - **Send**: send mail from a selected mailbox address.

@@ -1,31 +1,64 @@
-# Changelog
+# 更新日志 / Changelog
 
-All notable changes to this project will be documented in this file.
+本文件记录 CloudMail 的主要公开版本变化。
 
-## 1.0.12 - 2026-04-25
+## V1.1.0 - 2026-04-29
 
-- Added administrator-side new-mail unread dots for incrementally refreshed inbox and unknown-recipient mail, with local read-state sync across matching messages.
-- Added a clear `验证码已复制` toast when copying detected verification codes, and marks copied messages as read locally.
-- Polished address group modals with a stable centered layout, lightweight backdrop, and keyboard-aware sizing that avoids the previous input flicker.
-- Improved single-address compose keyboard behavior so the body field and send controls remain reachable while typing.
-- Tuned admin pager gestures so one swipe changes at most one page, with smoother settling animations.
-- Compressed admin address, inbox, sent, and unknown page toolbars to leave more space for list previews while preserving touch targets.
+V1.1.0 是从 GitHub 上一个正式版本 **V1.0.12** 之后的管理员增强版本，重点是大量地址、用户筛选、批量操作和垃圾信箱。
 
-## 1.0.11 - 2026-04-25
+### 新增
 
-- Switched the app flow to administrator-first startup and moved admin settings to a root-level route.
-- Added OLED black theme support with remembered dark-theme preference for the admin quick toggle.
-- Added full-screen Reanimated pager navigation for admin pages with smoother tap and swipe transitions.
-- Optimized admin navigation responsiveness, list rendering, cold-page placeholders, and background prefetch behavior.
-- Refreshed README documentation for the new admin-first workflow.
+- 新增地址页 **全部用户 / 指定用户** 筛选入口，适配网页版实际接口 `/admin/users/bind_address/:user_id`，可查看某个用户绑定的邮箱地址。
+- 新增大量地址场景下的后台地址索引，分组和搜索不再只依赖当前分页数据，适合 800+ 地址的管理场景。
+- 新增地址选择模式，可长按地址进入批量管理。
+- 新增批量操作：全选当前范围、删除地址、清空收件、清空发件、清空全部邮件、删除空邮箱、批量加入/移出本地分组。
+- 新增收件页内置 **垃圾信箱**，通过标题下拉在 `收件箱 / 垃圾信箱` 间切换，不占用额外顶部导航栏空间。
+- 新增本地拒收规则，按完整发件邮箱地址将命中邮件归入垃圾信箱。
+- 新增长按邮件浮层菜单，可拒收发件人、取消拒收或删除邮件。
+- 新增 **一键全部已读**，可清除当前 Worker 下本地未读点，并同步到已挂载页面。
+- 新增共享浮层菜单组件，用于更精致的长按菜单和轻量弹出菜单。
 
-## 1.0.10 - 2026-04-25
+### 优化
 
-- Prepared the repository for public GitHub release as CloudMail.
-- Kept APK files out of source control and documented GitHub Releases as the distribution path.
-- Added open source project metadata and contribution documentation.
-- Added upstream mailbox system attribution for dreamhunter2333/cloudflare_temp_email.
+- 优化邮箱分组、收件箱切换、长按操作等浮层视觉，减少原生弹窗的突兀感。
+- 优化地址页用户筛选逻辑：不再误用 `/admin/address?user_id=`，避免错误提示“当前后端暂不能按照用户筛选地址”。
+- 优化用户切换时的请求竞态处理，避免旧请求覆盖新用户视图。
+- 优化地址缓存失效逻辑，删除、创建、绑定、未知邮件创建地址、批量操作后不再回放旧列表。
+- 优化刷新/同步/加载状态归属，避免失效请求导致加载状态卡住。
+- 优化垃圾信箱和普通收件、未知邮件之间的本地状态同步。
 
-## Earlier versions
+### 修复
 
-Earlier APK builds were local development builds. See Git history and project documentation for implementation details.
+- 修复地址数量很多时，分组内地址显示不全的问题。
+- 修复选择某个用户后一直显示“正在识别用户信息”或无法显示绑定地址的问题。
+- 修复 `/admin/address` 不返回 `user_id` 时 App 误判后端不支持用户筛选的问题。
+- 修复快速切换用户、刷新、搜索时可能出现旧数据闪现的问题。
+
+## V1.0.12 - 2026-04-25
+
+- 新增管理员侧新邮件未读点，增量刷新出现的新收件和未知邮件会显示本地未读标识。
+- 新增收件与未知邮件之间的本地已读状态同步。
+- 新增验证码复制成功提示 `验证码已复制`，复制成功后同步标记邮件已读。
+- 优化邮箱分组弹层，改为稳定的居中轻弹层并修复键盘输入时的闪烁问题。
+- 优化单邮箱详情发件表单的键盘避让体验。
+- 优化管理员页面滑动手感，一次手势最多切换一个页面。
+- 压缩地址、收件、发件和未知页面顶部工具区，给列表预览留出更多空间。
+
+## V1.0.11 - 2026-04-25
+
+- 应用流程改为管理员优先启动，管理员设置页移动到根级路由。
+- 新增 OLED 黑主题，并让管理员快捷主题按钮记住用户偏好的深色变体。
+- 新增管理员页面全屏 Reanimated 分页切换。
+- 优化管理员导航响应速度、列表渲染、页面预热和后台刷新体验。
+- 更新 README，说明新的管理员优先使用流程。
+
+## V1.0.10 - 2026-04-25
+
+- 准备 CloudMail 公开 GitHub 发布。
+- APK 改为通过 GitHub Releases 分发，不提交到源码仓库。
+- 补充开源项目元信息、贡献说明和安全说明。
+- 增加对上游项目 `dreamhunter2333/cloudflare_temp_email` 的致谢说明。
+
+## 更早版本
+
+更早版本主要是本地开发构建。可通过 Git 历史查看具体实现细节。

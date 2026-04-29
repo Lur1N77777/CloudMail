@@ -1,8 +1,22 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Alert,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  type GestureResponderEvent,
+} from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { DetailMetaRow } from "@/components/detail-meta-row";
+import {
+  FloatingActionMenu,
+  type FloatingActionMenuAnchor,
+  type FloatingActionMenuItem,
+} from "@/components/floating-action-menu";
 import { MailBodyView } from "@/components/mail-body-view";
 import { MiniToast } from "@/components/mini-toast";
 import { ScreenContainer } from "@/components/screen-container";
@@ -10,6 +24,14 @@ import { IconSymbol } from "@/components/ui/icon-symbol";
 import { adminDeleteMail, adminDeleteSentMail } from "@/lib/api";
 import { getAdminMailEntry, removeAdminMailEntry } from "@/lib/admin-mail-store";
 import { markAdminMailRead } from "@/lib/admin-mail-read-state";
+import {
+  blockAdminMailSender,
+  getAdminMailSpamSender,
+  isAdminMailSpamBySenderSet,
+  loadAdminMailSpamSenderSet,
+  subscribeAdminMailSpamState,
+  unblockAdminMailSender,
+} from "@/lib/admin-mail-spam-state";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { downloadMailBody, openMailFile, shareMailBody } from "@/lib/mail-download";
 import { useMail } from "@/lib/mail-context";
@@ -59,6 +81,12 @@ export default function AdminMailDetailScreen() {
   const router = useRouter();
   const { state: mailState } = useMail();
   const [miniToastMessage, setMiniToastMessage] = useState<string | null>(null);
+  const [blockedSenders, setBlockedSenders] = useState<Set<string>>(new Set());
+  const [actionMenu, setActionMenu] = useState<{
+    anchor: FloatingActionMenuAnchor;
+    items: FloatingActionMenuItem[];
+  } | null>(null);
+  const screenRootRef = useRef<React.ElementRef<typeof View>>(null);
   const { cacheKey } = useLocalSearchParams<{ cacheKey?: string }>();
 
   const entry = useMemo(
@@ -70,6 +98,9 @@ export default function AdminMailDetailScreen() {
   const kind = entry?.kind;
   const code = mail ? getVerificationCode(mail) : null;
   const isSentView = kind === "sendbox";
+  const spamSender = mail ? getAdminMailSpamSender(mail) : "";
+  const isSpam = mail ? isAdminMailSpamBySenderSet(mail, blockedSenders) : false;
+  const canToggleSpam = !!mail && !isSentView && !!spamSender;
   const kindLabel = getKindLabel(kind);
   const sender = mail ? getSenderDisplay(mail) : "";
   const recipients = mail
@@ -92,6 +123,32 @@ export default function AdminMailDetailScreen() {
     if (!mail || kind === "sendbox" || !mailState.workerUrl.trim()) return;
     void markAdminMailRead(mailState.workerUrl, mail);
   }, [kind, mail, mailState.workerUrl]);
+
+  useEffect(() => {
+    if (!mailState.workerUrl.trim()) {
+      setBlockedSenders(new Set());
+      return;
+    }
+
+    let isMounted = true;
+    const refresh = async () => {
+      const nextBlockedSenders = await loadAdminMailSpamSenderSet(mailState.workerUrl);
+      if (isMounted) {
+        setBlockedSenders(nextBlockedSenders);
+      }
+    };
+
+    void refresh();
+    const unsubscribe = subscribeAdminMailSpamState((event) => {
+      if (event.workerUrl !== mailState.workerUrl) return;
+      setBlockedSenders(new Set(event.blockedSenders));
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [mailState.workerUrl]);
 
   if (!mail || !cacheKey) {
     return (
@@ -177,9 +234,85 @@ export default function AdminMailDetailScreen() {
     }
   };
 
+  const handleToggleSpam = () => {
+    if (!mail || !canToggleSpam || !mailState.workerUrl.trim()) return;
+
+    if (isSpam) {
+      void unblockAdminMailSender(mailState.workerUrl, spamSender)
+        .then(() => {
+          setMiniToastMessage("已取消拒收");
+        })
+        .catch((err: any) => {
+          Alert.alert("操作失败", err?.message || "取消拒收失败");
+        });
+      return;
+    }
+
+    Alert.alert("拒收发件人", `以后来自 ${spamSender} 的邮件会进入垃圾信箱。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "拒收",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await blockAdminMailSender(mailState.workerUrl, mail);
+            void markAdminMailRead(mailState.workerUrl, mail);
+            setMiniToastMessage("已加入垃圾信箱");
+          } catch (err: any) {
+            Alert.alert("操作失败", err?.message || "拒收失败");
+          }
+        },
+      },
+    ]);
+  };
+
+  const closeActionMenu = () => {
+    setActionMenu(null);
+  };
+
+  const handleMoreActions = (event: GestureResponderEvent) => {
+    const pageX = event.nativeEvent.pageX;
+    const pageY = event.nativeEvent.pageY;
+    const items: FloatingActionMenuItem[] = [];
+
+    if (canToggleSpam) {
+      items.push({
+        key: isSpam ? "unblock" : "block",
+        label: isSpam ? "取消拒收" : "拒收该发件人",
+        subtitle: spamSender,
+        icon: isSpam ? "checkmark.circle.fill" : "xmark.circle.fill",
+        destructive: !isSpam,
+        onPress: handleToggleSpam,
+      });
+    }
+
+    items.push({
+      key: "delete",
+      label: "删除邮件",
+      subtitle: "从服务器移除",
+      icon: "trash.fill",
+      destructive: true,
+      onPress: handleDelete,
+    });
+
+    const rootNode = screenRootRef.current;
+    if (!rootNode) {
+      setActionMenu({ anchor: { x: pageX, y: pageY }, items });
+      return;
+    }
+
+    rootNode.measureInWindow((rootX, rootY) => {
+      setActionMenu({
+        anchor: { x: pageX - rootX, y: pageY - rootY },
+        items,
+      });
+    });
+  };
+
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]}>
-      <View style={[styles.header, { borderBottomColor: colors.border }]}>
+      <View ref={screenRootRef} collapsable={false} style={styles.screenRoot}>
+        <View style={[styles.header, { borderBottomColor: colors.border }]}>
         <Pressable
           onPress={() => router.back()}
           style={({ pressed }) => [styles.backButton, { opacity: pressed ? 0.6 : 1 }]}
@@ -206,15 +339,15 @@ export default function AdminMailDetailScreen() {
             <IconSymbol name="arrow.down.circle" size={21} color={colors.primary} />
           </Pressable>
           <Pressable
-            onPress={handleDelete}
+            onPress={handleMoreActions}
             style={({ pressed }) => [styles.actionButton, { opacity: pressed ? 0.6 : 1 }]}
           >
-            <IconSymbol name="trash.fill" size={20} color={colors.error} />
+            <IconSymbol name="ellipsis" size={22} color={colors.primary} />
           </Pressable>
         </View>
-      </View>
+        </View>
 
-      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         <View style={styles.heroSection}>
           <Text style={[styles.subject, { color: colors.foreground }]}>
             {mail.subject || "(无主题)"}
@@ -313,11 +446,19 @@ export default function AdminMailDetailScreen() {
             <SummaryRow label="邮件类型" value={kindLabel} />
           </View>
         ) : null}
-      </ScrollView>
-      <MiniToast
-        message={miniToastMessage}
-        onDismiss={() => setMiniToastMessage(null)}
-      />
+        </ScrollView>
+        <FloatingActionMenu
+          visible={!!actionMenu}
+          anchor={actionMenu?.anchor ?? null}
+          colors={colors}
+          items={actionMenu?.items ?? []}
+          onClose={closeActionMenu}
+        />
+        <MiniToast
+          message={miniToastMessage}
+          onDismiss={() => setMiniToastMessage(null)}
+        />
+      </View>
     </ScreenContainer>
   );
 }
@@ -345,6 +486,9 @@ function SummaryRow({
 }
 
 const styles = StyleSheet.create({
+  screenRoot: {
+    flex: 1,
+  },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",

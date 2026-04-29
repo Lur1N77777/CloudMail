@@ -81,3 +81,9 @@ frontend/
 
 # Local machine helper scripts
 scripts/use-node20.ps1
+
+# Local Android build toolchains used by Codex/local packaging
+.android-sdk/
+.jdk17/
+.codex-build-logs/
+
