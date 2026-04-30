@@ -3,12 +3,18 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   addAccount,
   adminLogin,
+  buildWorkerDomainEntries,
+  createAddress,
+  deleteAddressAdmin,
   deleteMail,
   fetchSettings,
   fetchMailHistory,
+  fetchMails,
   getAccounts,
+  getWorkerProfiles,
   getConfig,
   saveConfig,
+  setActiveWorkerProfileId,
 } from "../api";
 import { sha256Hex } from "../sha256";
 
@@ -103,6 +109,110 @@ describe("saveConfig", () => {
   });
 });
 
+describe("worker profiles", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("migrates legacy single Worker config into one default profile", async () => {
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      const map: Record<string, string> = {
+        cloudmail_worker_url: "https://worker-a.example.com///",
+        cloudmail_admin_password: "admin-a",
+        cloudmail_site_password: "site-a",
+      };
+      return Promise.resolve(map[key] || null);
+    });
+    (AsyncStorage.setItem as any).mockResolvedValue(undefined);
+
+    const profiles = await getWorkerProfiles();
+
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0]).toMatchObject({
+      name: "默认账号",
+      workerUrl: "https://worker-a.example.com",
+      adminPassword: "admin-a",
+      sitePassword: "site-a",
+    });
+    expect(AsyncStorage.setItem).toHaveBeenCalledWith(
+      "cloudmail_worker_profiles",
+      expect.stringContaining("https://worker-a.example.com")
+    );
+  });
+
+  it("switches active profile and exposes it through getConfig", async () => {
+    const profiles = [
+      {
+        id: "a",
+        name: "账号 A",
+        workerUrl: "https://worker-a.example.com",
+        adminPassword: "pass-a",
+        sitePassword: "",
+        domains: ["1.com"],
+        status: "connected",
+      },
+      {
+        id: "b",
+        name: "账号 B",
+        workerUrl: "https://worker-b.example.com",
+        adminPassword: "pass-b",
+        sitePassword: "site-b",
+        domains: ["4.com"],
+        status: "connected",
+      },
+    ];
+    let activeId = "a";
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      if (key === "cloudmail_worker_profiles") return Promise.resolve(JSON.stringify(profiles));
+      if (key === "cloudmail_active_worker_profile_id") return Promise.resolve(activeId);
+      if (key === "cloudmail_refresh_interval") return Promise.resolve("60");
+      return Promise.resolve(null);
+    });
+    (AsyncStorage.setItem as any).mockImplementation((key: string, value: string) => {
+      if (key === "cloudmail_active_worker_profile_id") activeId = value;
+      return Promise.resolve(undefined);
+    });
+    (AsyncStorage.multiSet as any).mockResolvedValue(undefined);
+
+    await setActiveWorkerProfileId("b");
+    const config = await getConfig();
+
+    expect(config.workerUrl).toBe("https://worker-b.example.com");
+    expect(config.adminPassword).toBe("pass-b");
+    expect(config.sitePassword).toBe("site-b");
+    expect(config.refreshInterval).toBe(60);
+  });
+
+  it("builds global domain entries and marks duplicated domains as conflicts", () => {
+    const entries = buildWorkerDomainEntries([
+      {
+        id: "a",
+        name: "账号 A",
+        workerUrl: "https://worker-a.example.com",
+        adminPassword: "pass-a",
+        domains: ["1.com", "shared.com"],
+        randomSubdomainDomains: ["1.com"],
+        status: "connected",
+      },
+      {
+        id: "b",
+        name: "账号 B",
+        workerUrl: "https://worker-b.example.com",
+        adminPassword: "pass-b",
+        domains: ["4.com", "shared.com"],
+        status: "connected",
+      },
+    ]);
+
+    expect(entries.find((item) => item.domain === "1.com")).toMatchObject({
+      workerProfileId: "a",
+      supportsRandom: true,
+      conflict: false,
+    });
+    expect(entries.filter((item) => item.domain === "shared.com").every((item) => item.conflict)).toBe(true);
+  });
+});
+
 describe("getAccounts / saveAccounts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -173,6 +283,56 @@ describe("addAccount", () => {
     );
     expect(savedData).toHaveLength(1);
     expect(savedData[0].jwt).toBe("new");
+  });
+
+  it("keeps the same email address separate across Worker profiles", async () => {
+    let storedAccounts = [
+      {
+        address: "same@example.com",
+        jwt: "jwt-a",
+        createdAt: "2024-01-01",
+        workerProfileId: "worker-a",
+        workerUrl: "https://worker-a.example.com",
+      },
+    ];
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      if (key === "cloudmail_accounts") {
+        return Promise.resolve(JSON.stringify(storedAccounts));
+      }
+      return Promise.resolve(null);
+    });
+    (AsyncStorage.setItem as any).mockImplementation((key: string, value: string) => {
+      if (key === "cloudmail_accounts") {
+        storedAccounts = JSON.parse(value);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    await addAccount({
+      address: "same@example.com",
+      jwt: "jwt-b",
+      createdAt: "2024-01-02",
+      workerProfileId: "worker-b",
+      workerUrl: "https://worker-b.example.com",
+    });
+
+    expect(storedAccounts).toHaveLength(2);
+    expect(storedAccounts.map((account) => account.jwt)).toEqual(["jwt-a", "jwt-b"]);
+
+    await addAccount({
+      address: "same@example.com",
+      jwt: "jwt-b-new",
+      createdAt: "2024-01-03",
+      workerProfileId: "worker-b",
+      workerUrl: "https://worker-b.example.com",
+    });
+
+    expect(storedAccounts).toHaveLength(2);
+    expect(storedAccounts[0].jwt).toBe("jwt-a");
+    expect(storedAccounts[1]).toMatchObject({
+      jwt: "jwt-b-new",
+      workerProfileId: "worker-b",
+    });
   });
 });
 
@@ -302,6 +462,72 @@ describe("fetchSettings", () => {
     expect(headers["Authorization"]).toBe("Bearer jwt-token");
     expect(headers["x-user-token"]).toBe("jwt-token");
     expect(headers["x-lang"]).toBe("zh");
+  });
+});
+
+describe("createAddress multi-worker routing", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    global.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("uses the Worker profile selected by domain routing", async () => {
+    const profiles = [
+      {
+        id: "a",
+        name: "账号 A",
+        workerUrl: "https://worker-a.example.com",
+        adminPassword: "pass-a",
+        sitePassword: "",
+        domains: ["1.com"],
+        status: "connected",
+      },
+      {
+        id: "b",
+        name: "账号 B",
+        workerUrl: "https://worker-b.example.com",
+        adminPassword: "pass-b",
+        sitePassword: "site-b",
+        domains: ["4.com"],
+        status: "connected",
+      },
+    ];
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      if (key === "cloudmail_worker_profiles") return Promise.resolve(JSON.stringify(profiles));
+      if (key === "cloudmail_active_worker_profile_id") return Promise.resolve("a");
+      return Promise.resolve(null);
+    });
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({ address: "demo@4.com", jwt: "jwt-b", address_id: 7 })
+        ),
+    });
+
+    const result = await createAddress({
+      name: "demo",
+      domain: "4.com",
+      workerProfileId: "b",
+    });
+
+    expect(result.address).toBe("demo@4.com");
+    expect(global.fetch).toHaveBeenCalledWith(
+      "https://worker-b.example.com/admin/new_address",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "x-admin-auth": "pass-b",
+          "x-custom-auth": "site-b",
+        }),
+      })
+    );
   });
 });
 
@@ -511,5 +737,84 @@ describe("fetchMailHistory", () => {
       "/api/mails?limit=2&offset=2"
     );
     expect(mails.map((mail) => mail.id)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("account scoped API routing", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    global.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("uses explicit account Worker config instead of the active Worker", async () => {
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      const map: Record<string, string> = {
+        cloudmail_worker_url: "https://active-worker.example.com",
+        cloudmail_admin_password: "active-pass",
+      };
+      return Promise.resolve(map[key] || null);
+    });
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ results: [], count: 0 })),
+    });
+
+    await fetchMails("jwt-b", 10, 0, {
+      configOverride: {
+        workerUrl: "https://account-worker.example.com",
+        sitePassword: "site-b",
+        lang: "zh",
+      },
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "https://account-worker.example.com/api/mails?limit=10&offset=0",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-custom-auth": "site-b",
+          "x-user-token": "jwt-b",
+        }),
+      })
+    );
+  });
+
+  it("routes admin address deletion to the account Worker when provided", async () => {
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      const map: Record<string, string> = {
+        cloudmail_worker_url: "https://active-worker.example.com",
+        cloudmail_admin_password: "active-pass",
+      };
+      return Promise.resolve(map[key] || null);
+    });
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve(""),
+    });
+
+    await deleteAddressAdmin(42, {
+      configOverride: {
+        workerUrl: "https://account-worker.example.com",
+        adminPassword: "account-admin",
+        sitePassword: "site-b",
+        lang: "zh",
+      },
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "https://account-worker.example.com/admin/delete_address/42",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({
+          "x-admin-auth": "account-admin",
+          "x-custom-auth": "site-b",
+        }),
+      })
+    );
   });
 });

@@ -3,7 +3,7 @@
 
 # CloudMail
 
-**V1.1.0 · Mobile admin app for Cloudflare Temp Email systems**
+**V1.1.1 · Multi-Worker mobile admin app for Cloudflare Temp Email systems**
 
 [![CI](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml/badge.svg)](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
@@ -25,23 +25,25 @@ The upstream project provides the Cloudflare Worker mailbox backend, web admin U
 
 CloudMail is **administrator-first**: first launch opens admin setup, and a valid configuration opens the admin console directly.
 
-## What's new in V1.1.0
+## What's new in V1.1.1
 
-V1.1.0 focuses on administrator management, large address collections, user filtering, batch operations, and spam-mailbox interactions.
+V1.1.1 adds multi Cloudflare account / multi Worker support for setups where different Cloudflare accounts run separate Worker deployments.
 
-- **Admin user address view**: the app now uses the same backend endpoint as the web admin page, `/admin/users/bind_address/:user_id`, so selecting a user can show addresses bound to that user.
-- **Large address indexing**: group filtering and search are more complete for 800+ address datasets and no longer rely only on the currently loaded page.
-- **Batch address management**: selection mode, select-current-scope, delete addresses, clear inbox mail, clear sent mail, clear all mail, delete empty addresses, and local group add/remove are supported.
-- **Inbox-embedded spam mailbox**: the inbox title opens a compact dropdown for `Inbox / Spam`; blocked senders are stored locally by full sender address.
-- **Long-press action menus**: mail rows no longer show permanent block buttons. Long press opens a polished floating menu for blocking, unblocking, or deleting.
-- **Mark all read**: inbox, unknown-recipient mail, and spam views can clear local unread dots for the current Worker.
-- **Better floating UI**: dropdowns, long-press menus, and slider-like controls use a more consistent lightweight style instead of raw native popups.
-- **User-filter stability**: fixed stale requests overwriting the selected user view, cached old address lists, and stuck loading/refresh states.
-- **Mobile polish retained**: new-mail dots, verification-code copy feedback, OLED black theme, compact toolbars, and keyboard avoidance from V1.0.12 remain available.
+- **Multiple Worker profiles**: `Workers configuration` is now a profile list. Each profile can store a name, Worker URL, admin password, site password, and cached domain list.
+- **Automatic migration**: existing single-Worker installations are migrated into a `Default account` profile, so users do not need to reconfigure the app after upgrading.
+- **Quick Worker switching**: the admin header shows the current Worker, such as `Account A ▾`, and lets admins switch the active management scope quickly.
+- **Domain-based address creation**: creating an address routes the request to the Worker that owns the selected domain. If account B owns `4.com`, selecting `4.com` uses account B's Worker automatically.
+- **Clear domain ownership**: the domain picker labels entries by Worker, such as `4.com · Account B`; duplicated domains are treated as conflicts instead of being selected silently.
+- **Unknown-recipient creation routing**: one-tap creation from unknown-recipient mail also resolves the target Worker by domain.
+- **Worker-scoped local state**: accounts, mail cache, unread dots, spam rules, and local address groups remain isolated per Worker. The same email address can exist under different Workers without overwriting another account.
+- **Safer connection tests**: testing a Worker validates settings and admin login, refreshes domains, and avoids writing stale async results over newer edits.
+- **No Cloudflare official API dependency**: multi-account support is implemented as local Worker profiles; no Cloudflare token is required.
 
 ## Highlights
 
 - **Cloudflare Temp Email mobile admin**: connect to your `cloudflare_temp_email` compatible Worker/API and manage temporary mailboxes from a phone.
+- **Multiple Cloudflare accounts / Workers**: store several local Worker profiles, useful when account A owns `1.com / 2.com / 3.com` and account B owns `4.com / 5.com / 6.com`.
+- **Domain-based routing**: address creation automatically calls the Worker that owns the selected domain, reducing manual switching mistakes.
 - **Admin console**: statistics, addresses, inbox mail, sent mail, unknown-recipient mail, and mail sending in one app.
 - **User-level management**: load admin users and view addresses bound to a selected user.
 - **Address management**: create custom, subdomain, and random-subdomain addresses; view credentials, clear inboxes, and delete addresses.
@@ -76,11 +78,12 @@ APK files are intentionally not committed to the source repository. This keeps t
 
 ### 1. Prepare your mailbox service
 
-CloudMail needs a deployed `cloudflare_temp_email` compatible service, meaning your Cloudflare temporary mailbox Worker/API. Prepare these values first:
+CloudMail needs one or more deployed `cloudflare_temp_email` compatible services, meaning your Cloudflare temporary mailbox Worker/API deployments. Prepare these values first:
 
-- **Worker URL**: for example, `https://your-worker.example.com`.
-- **Admin password**: used to enter the admin console.
-- **Site password**: required if your Worker uses `PASSWORDS`.
+- **Worker URL**: for example, `https://worker-a.example.com` and `https://worker-b.example.com`.
+- **Admin password**: each Worker has its own admin password.
+- **Site password**: required if a Worker uses `PASSWORDS`.
+- **Domain ownership**: for example, account A owns `1.com / 2.com / 3.com`, while account B owns `4.com / 5.com / 6.com`.
 
 If you have not deployed the backend yet, follow the upstream [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) project first.
 
@@ -88,29 +91,32 @@ If you have not deployed the backend yet, follow the upstream [cloudflare_temp_e
 
 1. Download and install the latest APK.
 2. Open CloudMail. The app opens directly to **Admin settings** on first launch.
-3. Fill in the Worker URL, admin password, site password, and auto-refresh interval.
-4. Choose light, dark, OLED black, or system theme under **Appearance**.
-5. Tap **Test connection** to make sure the Worker is reachable.
-6. Save the configuration. CloudMail validates the admin password and opens the **Admin console** when it succeeds.
+3. In **Workers configuration**, add one or more Worker profiles with name, Worker URL, admin password, and site password.
+4. Tap **Test connection / Refresh domains** to validate each Worker and cache its domain list.
+5. Pick the current default Worker and set the auto-refresh interval.
+6. Choose light, dark, OLED black, or system theme under **Appearance**.
+7. Save the configuration. CloudMail validates the current Worker admin password and opens the **Admin console** when it succeeds.
 
 ### 3. Daily use
 
 - Later launches open the admin console automatically if the saved configuration is still valid.
 - Tap **Settings** in the top-right corner of the admin console to edit Worker, password, refresh, and appearance settings.
+- Tap the Worker name in the admin header to switch the current management scope.
 - Use the top tabs to move between admin pages.
 - The theme quick toggle remembers your preferred dark variant. If you picked OLED black, switching from light back to dark returns to OLED black.
 - Newly refreshed mail shows a small dot until you open the detail page, copy a detected verification code, or mark all as read.
 - In the inbox page, tap the title dropdown to switch between inbox and spam.
 - Long-press mail for actions; long-press addresses to enter batch selection mode.
+- When creating an address, the domain picker labels the source Worker and routes the request automatically.
 
 ### 4. Admin pages
 
-- **Stats**: view address, inbox, sent mail, and unknown-recipient counts.
+- **Stats**: view address, inbox, sent mail, and unknown-recipient counts for the current Worker.
 - **Addresses**: search, create, group, filter by user, inspect credentials, clear inboxes, delete addresses, and batch manage mailboxes.
 - **Inbox**: view received mail, search, copy verification codes, see unread dots, use spam mailbox, and filter by local groups.
 - **Sent**: view sent mail records.
 - **Unknown**: view messages sent to addresses that have not been created yet, then create those addresses with one tap.
-- **Send**: send mail from a selected mailbox address.
+- **Send**: send mail from a selected mailbox address within the current Worker scope.
 
 ## Tech stack
 

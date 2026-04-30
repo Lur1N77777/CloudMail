@@ -10,6 +10,12 @@ import { AppState } from "react-native";
 import {
   getConfig,
   saveConfig,
+  buildMailAccountIdentityKey,
+  getWorkerProfiles,
+  saveWorkerProfiles,
+  getActiveWorkerProfileId,
+  setActiveWorkerProfileId,
+  getActiveWorkerProfile,
   getAccounts,
   saveAccounts,
   getActiveAccountIndex,
@@ -42,10 +48,24 @@ import {
   type SendMailPayload,
   type AutoReply,
   type UserAddressSettings,
+  type WorkerProfile,
+  type ApiRuntimeOptions,
 } from "./api";
 import { readMailboxCache, writeMailboxCache } from "./mail-cache";
 import { mergeMailLists, sortMailsDesc } from "./mail-list-utils";
 import { parseMailBatch } from "./mail-parser";
+
+function findMailAccountIndex(accounts: MailAccount[], account: MailAccount) {
+  const targetKey = buildMailAccountIdentityKey(account);
+  return accounts.findIndex(
+    (item) => buildMailAccountIdentityKey(item) === targetKey
+  );
+}
+
+function normalizeEmailDomain(email: string) {
+  const parts = email.trim().toLowerCase().split("@");
+  return parts.length >= 2 ? parts.pop()?.trim() || "" : "";
+}
 
 // ─── State ──────────────────────────────────────────────────────
 interface MailState {
@@ -55,6 +75,8 @@ interface MailState {
   sitePassword: string;
   refreshInterval: number;
   isConfigured: boolean;
+  workerProfiles: WorkerProfile[];
+  activeWorkerProfileId: string;
 
   // Accounts
   accounts: MailAccount[];
@@ -88,6 +110,8 @@ const initialState: MailState = {
   sitePassword: "",
   refreshInterval: 30,
   isConfigured: false,
+  workerProfiles: [],
+  activeWorkerProfileId: "",
   accounts: [],
   activeAccountIndex: 0,
   settings: null,
@@ -113,9 +137,18 @@ type Action =
         adminPassword: string;
         sitePassword: string;
         refreshInterval: number;
+        workerProfiles?: WorkerProfile[];
+        activeWorkerProfileId?: string;
       };
     }
-  | { type: "SET_SETTINGS"; payload: SiteSettings }
+  | {
+      type: "SET_WORKER_PROFILES";
+      payload: {
+        workerProfiles: WorkerProfile[];
+        activeWorkerProfileId: string;
+      };
+    }
+  | { type: "SET_SETTINGS"; payload: SiteSettings | null }
   | { type: "SET_USER_SETTINGS"; payload: UserAddressSettings | null }
   | {
       type: "SET_ACCOUNTS";
@@ -145,9 +178,18 @@ function reducer(state: MailState, action: Action): MailState {
         ...state,
         ...action.payload,
         isConfigured: !!action.payload.workerUrl,
+        workerProfiles: action.payload.workerProfiles ?? state.workerProfiles,
+        activeWorkerProfileId:
+          action.payload.activeWorkerProfileId ?? state.activeWorkerProfileId,
         settings: changed ? null : state.settings,
       };
     }
+    case "SET_WORKER_PROFILES":
+      return {
+        ...state,
+        workerProfiles: action.payload.workerProfiles,
+        activeWorkerProfileId: action.payload.activeWorkerProfileId,
+      };
     case "SET_SETTINGS":
       return { ...state, settings: action.payload };
     case "SET_USER_SETTINGS":
@@ -193,6 +235,13 @@ interface MailContextValue {
     sitePassword: string;
     refreshInterval: number;
   }) => Promise<void>;
+  updateWorkerProfiles: (
+    profiles: WorkerProfile[],
+    activeProfileId: string,
+    refreshInterval: number
+  ) => Promise<void>;
+  switchWorkerProfile: (profileId: string) => Promise<void>;
+  reloadWorkerProfiles: () => Promise<void>;
   loadSettings: (options?: {
     throwOnError?: boolean;
   }) => Promise<SiteSettings | null>;
@@ -202,6 +251,7 @@ interface MailContextValue {
     domain: string;
     enablePrefix?: boolean;
     enableRandomSubdomain?: boolean;
+    workerProfileId?: string;
   }) => Promise<{ address: string; jwt: string; password?: string }>;
   switchAccount: (index: number) => Promise<void>;
   deleteAccount: (
@@ -250,22 +300,78 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     state.activeAccountIndex < state.accounts.length
       ? state.accounts[state.activeAccountIndex]
       : null;
+  const activeAccountIdentity = activeAccount
+    ? buildMailAccountIdentityKey(activeAccount)
+    : "";
 
   const getMailboxCacheInput = useCallback(
     (account: MailAccount, box: "inbox" | "sent") => ({
-      workerUrl: state.workerUrl,
+      workerUrl: account.workerUrl || state.workerUrl,
       address: account.address,
       box,
     }),
     [state.workerUrl]
   );
 
+  const getAccountApiOptions = useCallback(
+    async (account: MailAccount): Promise<ApiRuntimeOptions | undefined> => {
+      const profiles = await getWorkerProfiles();
+      const profile =
+        (account.workerProfileId
+          ? profiles.find((item) => item.id === account.workerProfileId)
+          : undefined) ||
+        (account.workerUrl
+          ? profiles.find(
+              (item) =>
+                item.workerUrl.replace(/\/+$/, "").toLowerCase() ===
+                account.workerUrl!.replace(/\/+$/, "").toLowerCase()
+            )
+          : undefined);
+      if (profile) return { workerProfile: profile };
+      if (account.workerUrl) {
+        return {
+          configOverride: {
+            workerUrl: account.workerUrl,
+            lang: "zh",
+          },
+        };
+      }
+      return undefined;
+    },
+    []
+  );
+
+  const resolveImportWorkerProfileForEmail = useCallback(async (email: string) => {
+    const domain = normalizeEmailDomain(email);
+    const [profiles, activeWorker] = await Promise.all([
+      getWorkerProfiles(),
+      getActiveWorkerProfile(),
+    ]);
+    if (!domain) return activeWorker;
+    const matches = profiles.filter((profile) =>
+      (profile.domains || []).some(
+        (item) => item.trim().toLowerCase() === domain
+      )
+    );
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      throw new Error(
+        `域名 ${domain} 同时存在于多个 Worker，请先在管理员设置中确认域名归属，或切换到明确的 Worker 后再导入。`
+      );
+    }
+    return activeWorker;
+  }, []);
+
   // ── Initialize ──
   const initialize = useCallback(async () => {
     try {
-      const config = await getConfig();
-      const accounts = await getAccounts();
-      const activeIndex = await getActiveAccountIndex();
+      const workerProfiles = await getWorkerProfiles();
+      const [config, activeWorkerProfileId, accounts, activeIndex] = await Promise.all([
+        getConfig(),
+        getActiveWorkerProfileId(),
+        getAccounts(),
+        getActiveAccountIndex(),
+      ]);
       let shouldEnterAdminMode = false;
 
       if (config.workerUrl && config.adminPassword) {
@@ -285,6 +391,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
           sitePassword: config.sitePassword,
           refreshInterval: config.refreshInterval,
           isConfigured: !!config.workerUrl,
+          workerProfiles,
+          activeWorkerProfileId,
           accounts,
           activeAccountIndex: Math.min(
             activeIndex,
@@ -308,7 +416,14 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     }) => {
       try {
         await saveConfig(config);
-        dispatch({ type: "SET_CONFIG", payload: config });
+        const [workerProfiles, activeWorkerProfileId] = await Promise.all([
+          getWorkerProfiles(),
+          getActiveWorkerProfileId(),
+        ]);
+        dispatch({
+          type: "SET_CONFIG",
+          payload: { ...config, workerProfiles, activeWorkerProfileId },
+        });
         dispatch({ type: "SET_SUCCESS", payload: "配置已保存" });
       } catch {
         dispatch({ type: "SET_ERROR", payload: "保存配置失败" });
@@ -317,6 +432,83 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     },
     []
   );
+
+  const updateWorkerProfiles = useCallback(
+    async (
+      profiles: WorkerProfile[],
+      activeProfileId: string,
+      refreshInterval: number
+    ) => {
+      try {
+        const savedProfiles = await saveWorkerProfiles(profiles);
+        await setActiveWorkerProfileId(activeProfileId || savedProfiles[0]?.id || "");
+        await saveConfig({ refreshInterval });
+        const [config, nextProfiles, nextActiveId] = await Promise.all([
+          getConfig(),
+          getWorkerProfiles(),
+          getActiveWorkerProfileId(),
+        ]);
+        dispatch({
+          type: "SET_CONFIG",
+          payload: {
+            workerUrl: config.workerUrl,
+            adminPassword: config.adminPassword,
+            sitePassword: config.sitePassword,
+            refreshInterval: config.refreshInterval,
+            workerProfiles: nextProfiles,
+            activeWorkerProfileId: nextActiveId,
+          },
+        });
+        dispatch({ type: "SET_SETTINGS", payload: null });
+        dispatch({ type: "SET_SUCCESS", payload: "Workers 配置已保存" });
+      } catch {
+        dispatch({ type: "SET_ERROR", payload: "保存 Workers 配置失败" });
+        throw new Error("保存 Workers 配置失败");
+      }
+    },
+    []
+  );
+
+  const reloadWorkerProfiles = useCallback(async () => {
+    const [workerProfiles, activeWorkerProfileId] = await Promise.all([
+      getWorkerProfiles(),
+      getActiveWorkerProfileId(),
+    ]);
+    dispatch({
+      type: "SET_WORKER_PROFILES",
+      payload: { workerProfiles, activeWorkerProfileId },
+    });
+  }, []);
+
+  const switchWorkerProfile = useCallback(async (profileId: string) => {
+    try {
+      await setActiveWorkerProfileId(profileId);
+      const [config, workerProfiles, activeWorkerProfileId] = await Promise.all([
+        getConfig(),
+        getWorkerProfiles(),
+        getActiveWorkerProfileId(),
+      ]);
+      dispatch({
+        type: "SET_CONFIG",
+        payload: {
+          workerUrl: config.workerUrl,
+          adminPassword: config.adminPassword,
+          sitePassword: config.sitePassword,
+          refreshInterval: config.refreshInterval,
+          workerProfiles,
+          activeWorkerProfileId,
+        },
+      });
+      dispatch({ type: "SET_SETTINGS", payload: null });
+      dispatch({ type: "SET_USER_SETTINGS", payload: null });
+      dispatch({ type: "SET_MAILS", payload: [] });
+      dispatch({ type: "SET_SENT_MAILS", payload: [] });
+      dispatch({ type: "SET_SUCCESS", payload: "已切换 Worker" });
+    } catch {
+      dispatch({ type: "SET_ERROR", payload: "切换 Worker 失败" });
+      throw new Error("切换 Worker 失败");
+    }
+  }, []);
 
   // ── Load Site Settings ──
   const loadSettings = useCallback(
@@ -347,7 +539,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       return null;
     }
     try {
-      const settings = await fetchUserAddressSettings(account.jwt);
+      const apiOptions = await getAccountApiOptions(account);
+      const settings = await fetchUserAddressSettings(account.jwt, apiOptions);
       dispatch({
         type: "SET_USER_SETTINGS",
         payload: { ...settings, fetched: true },
@@ -361,7 +554,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       });
       return null;
     }
-  }, []);
+  }, [getAccountApiOptions]);
 
   // ── Create Address ──
   const createNewAddress = useCallback(
@@ -370,19 +563,28 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       domain: string;
       enablePrefix?: boolean;
       enableRandomSubdomain?: boolean;
+      workerProfileId?: string;
     }) => {
       try {
         const result = await createAddress(params);
+        const profiles = await getWorkerProfiles();
+        const targetWorker =
+          (params.workerProfileId
+            ? profiles.find((profile) => profile.id === params.workerProfileId)
+            : undefined) ||
+          (await getActiveWorkerProfile());
         const newAccount: MailAccount = {
           address: result.address,
           jwt: result.jwt,
           addressId: result.address_id,
           password: result.password,
           createdAt: new Date().toISOString(),
+          workerProfileId: targetWorker?.id,
+          workerUrl: targetWorker?.workerUrl || state.workerUrl,
         };
         await storeAddAccount(newAccount);
         const accounts = await getAccounts();
-        const idx = accounts.findIndex((a) => a.address === result.address);
+        const idx = findMailAccountIndex(accounts, newAccount);
         const activeIndex = idx >= 0 ? idx : accounts.length - 1;
         dispatch({
           type: "SET_ACCOUNTS",
@@ -405,7 +607,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         throw err;
       }
     },
-    []
+    [state.workerUrl]
   );
 
   // ── Switch Account ──
@@ -444,10 +646,11 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
           const account = accounts[index];
           if (account) {
             try {
+              const apiOptions = await getAccountApiOptions(account);
               if (account.addressId !== undefined) {
-                await deleteAddressAdmin(account.addressId);
+                await deleteAddressAdmin(account.addressId, apiOptions);
               } else {
-                await deleteAddressUser(account.jwt);
+                await deleteAddressUser(account.jwt, apiOptions);
               }
             } catch (err: any) {
               dispatch({
@@ -471,7 +674,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: "SET_ERROR", payload: err.message || "删除失败" });
       }
     },
-    []
+    [getAccountApiOptions]
   );
 
   // ── Load Mails ──
@@ -489,9 +692,11 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
 
     dispatch({ type: "SET_LOADING_MAILS", payload: true });
     try {
+      const apiOptions = await getAccountApiOptions(account);
       const rawMails = await fetchMailHistory(account.jwt, {
         pageSize: 100,
         maxPages: 100,
+        ...apiOptions,
       });
       const parsed = await parseMailBatch(rawMails);
       const nextMails = sortMailsDesc(parsed);
@@ -505,7 +710,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     } finally {
       dispatch({ type: "SET_LOADING_MAILS", payload: false });
     }
-  }, [getMailboxCacheInput]);
+  }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Refresh Mails ──
   const refreshMails = useCallback(async () => {
@@ -517,7 +722,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     const cacheInput = getMailboxCacheInput(account, "inbox");
     dispatch({ type: "SET_REFRESHING", payload: true });
     try {
-      const { results } = await fetchMails(account.jwt, 100, 0);
+      const apiOptions = await getAccountApiOptions(account);
+      const { results } = await fetchMails(account.jwt, 100, 0, apiOptions);
       const parsed = await parseMailBatch(results);
       const nextMails = mergeMailLists(mailsRef.current, parsed);
       dispatch({
@@ -530,7 +736,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     } finally {
       dispatch({ type: "SET_REFRESHING", payload: false });
     }
-  }, [getMailboxCacheInput]);
+  }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Load Sent Mails ──
   const loadSentMails = useCallback(async () => {
@@ -547,9 +753,11 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
 
     dispatch({ type: "SET_LOADING_SENT", payload: true });
     try {
+      const apiOptions = await getAccountApiOptions(account);
       const rawMails = await fetchSentMailHistory(account.jwt, {
         pageSize: 100,
         maxPages: 50,
+        ...apiOptions,
       });
       const parsed = await parseMailBatch(rawMails);
       const nextMails = sortMailsDesc(parsed);
@@ -563,7 +771,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     } finally {
       dispatch({ type: "SET_LOADING_SENT", payload: false });
     }
-  }, [getMailboxCacheInput]);
+  }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Refresh Sent Mails ──
   const refreshSentMails = useCallback(async () => {
@@ -575,7 +783,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     const cacheInput = getMailboxCacheInput(account, "sent");
     dispatch({ type: "SET_LOADING_SENT", payload: true });
     try {
-      const { results } = await fetchSentMails(account.jwt, 100, 0);
+      const apiOptions = await getAccountApiOptions(account);
+      const { results } = await fetchSentMails(account.jwt, 100, 0, apiOptions);
       const parsed = await parseMailBatch(results);
       const nextMails = mergeMailLists(sentMailsRef.current, parsed);
       dispatch({
@@ -588,7 +797,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     } finally {
       dispatch({ type: "SET_LOADING_SENT", payload: false });
     }
-  }, [getMailboxCacheInput]);
+  }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Delete Mail ──
   const deleteMailById = useCallback(async (mailId: number) => {
@@ -598,7 +807,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     if (!account) return false;
 
     try {
-      await apiDeleteMail(account.jwt, mailId);
+      const apiOptions = await getAccountApiOptions(account);
+      await apiDeleteMail(account.jwt, mailId, apiOptions);
       const nextMails = mailsRef.current.filter((m) => m.id !== mailId);
       dispatch({
         type: "SET_MAILS",
@@ -614,7 +824,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       });
       return false;
     }
-  }, [getMailboxCacheInput]);
+  }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Delete Sent Mail ──
   const deleteSentMailById = useCallback(
@@ -625,7 +835,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       if (!account) return false;
 
       try {
-        await apiDeleteSentMail(account.jwt, mailId);
+        const apiOptions = await getAccountApiOptions(account);
+        await apiDeleteSentMail(account.jwt, mailId, apiOptions);
         const nextMails = sentMailsRef.current.filter((m) => m.id !== mailId);
         dispatch({
           type: "SET_SENT_MAILS",
@@ -642,7 +853,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         return false;
       }
     },
-    [getMailboxCacheInput]
+    [getAccountApiOptions, getMailboxCacheInput]
   );
 
   // ── Clear Inbox ──
@@ -652,14 +863,15 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     const account = accounts[activeIndex];
     if (!account) return;
     try {
-      await apiClearInbox(account.jwt);
+      const apiOptions = await getAccountApiOptions(account);
+      await apiClearInbox(account.jwt, apiOptions);
       dispatch({ type: "SET_MAILS", payload: [] });
       await writeMailboxCache(getMailboxCacheInput(account, "inbox"), []);
       dispatch({ type: "SET_SUCCESS", payload: "收件箱已清空" });
     } catch (err: any) {
       dispatch({ type: "SET_ERROR", payload: err.message || "清空失败" });
     }
-  }, [getMailboxCacheInput]);
+  }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Clear Sent ──
   const clearSentItems = useCallback(async () => {
@@ -668,14 +880,15 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     const account = accounts[activeIndex];
     if (!account) return;
     try {
-      await apiClearSentItems(account.jwt);
+      const apiOptions = await getAccountApiOptions(account);
+      await apiClearSentItems(account.jwt, apiOptions);
       dispatch({ type: "SET_SENT_MAILS", payload: [] });
       await writeMailboxCache(getMailboxCacheInput(account, "sent"), []);
       dispatch({ type: "SET_SUCCESS", payload: "发件箱已清空" });
     } catch (err: any) {
       dispatch({ type: "SET_ERROR", payload: err.message || "清空失败" });
     }
-  }, [getMailboxCacheInput]);
+  }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Send Email ──
   const sendEmail = useCallback(async (payload: SendMailPayload) => {
@@ -685,13 +898,14 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     if (!account) throw new Error("请先选择邮箱地址");
 
     try {
-      await apiSendMail(account.jwt, payload);
+      const apiOptions = await getAccountApiOptions(account);
+      await apiSendMail(account.jwt, payload, apiOptions);
       dispatch({ type: "SET_SUCCESS", payload: "邮件发送成功" });
     } catch (err: any) {
       dispatch({ type: "SET_ERROR", payload: err.message || "发送失败" });
       throw err;
     }
-  }, []);
+  }, [getAccountApiOptions]);
 
   // ── Request Send Mail Access ──
   const requestSendMailAccess = useCallback(async () => {
@@ -700,7 +914,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     const account = accounts[activeIndex];
     if (!account) throw new Error("请先选择邮箱地址");
     try {
-      await apiRequestSendMailAccess(account.jwt);
+      const apiOptions = await getAccountApiOptions(account);
+      await apiRequestSendMailAccess(account.jwt, apiOptions);
       dispatch({ type: "SET_SUCCESS", payload: "已申请发件权限" });
     } catch (err: any) {
       dispatch({
@@ -709,14 +924,16 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       });
       throw err;
     }
-  }, []);
+  }, [getAccountApiOptions]);
 
   // ── Import by Credential (JWT string) ──
   const importByCredential = useCallback(async (credential: string) => {
     try {
-      const { jwt } = await apiLoginWithCredential(credential.trim());
+      const activeWorker = await getActiveWorkerProfile();
+      const apiOptions = activeWorker ? { workerProfile: activeWorker } : undefined;
+      const { jwt } = await apiLoginWithCredential(credential.trim(), apiOptions);
       // We don't know the address from just the credential — use /api/settings to fetch it.
-      const userSettings = await fetchUserAddressSettings(jwt).catch(() => null);
+      const userSettings = await fetchUserAddressSettings(jwt, apiOptions).catch(() => null);
       const address = userSettings?.address;
       if (!address) {
         throw new Error("无法获取凭证对应的邮箱地址");
@@ -725,10 +942,12 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         address,
         jwt,
         createdAt: new Date().toISOString(),
+        workerProfileId: activeWorker?.id,
+        workerUrl: activeWorker?.workerUrl || state.workerUrl,
       };
       await storeAddAccount(newAccount);
       const accounts = await getAccounts();
-      const idx = accounts.findIndex((a) => a.address === address);
+      const idx = findMailAccountIndex(accounts, newAccount);
       dispatch({
         type: "SET_ACCOUNTS",
         payload: {
@@ -744,22 +963,26 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       });
       throw err;
     }
-  }, []);
+  }, [state.workerUrl]);
 
   // ── Import by Email + Password ──
   const importByPassword = useCallback(
     async (email: string, password: string) => {
       try {
-        const { jwt } = await apiLoginWithAddressPassword({ email, password });
+        const activeWorker = await resolveImportWorkerProfileForEmail(email);
+        const apiOptions = activeWorker ? { workerProfile: activeWorker } : undefined;
+        const { jwt } = await apiLoginWithAddressPassword({ email, password }, apiOptions);
         const newAccount: MailAccount = {
           address: email,
           jwt,
           password,
           createdAt: new Date().toISOString(),
+          workerProfileId: activeWorker?.id,
+          workerUrl: activeWorker?.workerUrl || state.workerUrl,
         };
         await storeAddAccount(newAccount);
         const accounts = await getAccounts();
-        const idx = accounts.findIndex((a) => a.address === email);
+        const idx = findMailAccountIndex(accounts, newAccount);
         dispatch({
           type: "SET_ACCOUNTS",
           payload: {
@@ -776,7 +999,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         throw err;
       }
     },
-    []
+    [resolveImportWorkerProfileForEmail, state.workerUrl]
   );
 
   // ── Change Password ──
@@ -787,10 +1010,11 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       const account = accounts[activeIndex];
       if (!account) throw new Error("请先选择邮箱地址");
       try {
+        const apiOptions = await getAccountApiOptions(account);
         await apiChangeAddressPassword(account.jwt, {
           password: newPassword,
           old_password: oldPassword,
-        });
+        }, apiOptions);
         // Persist the new password so we can show it in the UI
         const next = [...accounts];
         next[activeIndex] = { ...account, password: newPassword };
@@ -808,7 +1032,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         throw err;
       }
     },
-    []
+    [getAccountApiOptions]
   );
 
   // ── Save Auto Reply ──
@@ -818,7 +1042,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     const account = accounts[activeIndex];
     if (!account) throw new Error("请先选择邮箱地址");
     try {
-      await apiSetAutoReply(account.jwt, autoReply);
+      const apiOptions = await getAccountApiOptions(account);
+      await apiSetAutoReply(account.jwt, autoReply, apiOptions);
       dispatch({
         type: "SET_USER_SETTINGS",
         payload: {
@@ -835,7 +1060,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       });
       throw err;
     }
-  }, [state.userSettings]);
+  }, [getAccountApiOptions, state.userSettings]);
 
   const clearError = useCallback(() => {
     dispatch({ type: "SET_ERROR", payload: null });
@@ -852,7 +1077,11 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     try {
       const trimmedPassword = password.trim();
       await apiAdminLogin(trimmedPassword);
-      const latestConfig = await getConfig();
+      const [latestConfig, workerProfiles, activeWorkerProfileId] = await Promise.all([
+        getConfig(),
+        getWorkerProfiles(),
+        getActiveWorkerProfileId(),
+      ]);
       dispatch({
         type: "SET_CONFIG",
         payload: {
@@ -862,6 +1091,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
           refreshInterval: Number.isFinite(latestConfig.refreshInterval)
             ? latestConfig.refreshInterval
             : state.refreshInterval,
+          workerProfiles,
+          activeWorkerProfileId,
         },
       });
       dispatch({ type: "SET_ADMIN_MODE", payload: true });
@@ -874,7 +1105,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       });
       throw err;
     }
-  }, [state.workerUrl, state.sitePassword, state.refreshInterval]);
+  }, [state.workerUrl, state.refreshInterval]);
 
   const exitAdminMode = useCallback(() => {
     dispatch({ type: "SET_ADMIN_MODE", payload: false });
@@ -890,15 +1121,15 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!state.isInitialized || !state.isConfigured) return;
     loadSettings();
-  }, [state.isInitialized, state.isConfigured, loadSettings]);
+  }, [state.isInitialized, state.isConfigured, state.workerUrl, loadSettings]);
 
   // ── Load mails after account switch ──
   useEffect(() => {
-    if (!state.isInitialized || !state.isConfigured || !activeAccount?.address) return;
+    if (!state.isInitialized || !state.isConfigured || !activeAccountIdentity) return;
     loadMails();
     loadUserSettings();
   }, [
-    activeAccount?.address,
+    activeAccountIdentity,
     loadMails,
     loadUserSettings,
     state.isConfigured,
@@ -911,7 +1142,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       clearInterval(refreshTimerRef.current);
       refreshTimerRef.current = null;
     }
-    if (state.isConfigured && activeAccount?.address && state.refreshInterval > 0) {
+    if (state.isConfigured && activeAccountIdentity && state.refreshInterval > 0) {
       refreshTimerRef.current = setInterval(() => {
         refreshMails();
       }, state.refreshInterval * 1000);
@@ -921,7 +1152,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     };
   }, [
     state.isConfigured,
-    activeAccount?.address,
+    activeAccountIdentity,
     state.refreshInterval,
     refreshMails,
   ]);
@@ -962,6 +1193,9 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     state,
     initialize,
     updateConfig,
+    updateWorkerProfiles,
+    switchWorkerProfile,
+    reloadWorkerProfiles,
     loadSettings,
     loadUserSettings,
     createNewAddress,

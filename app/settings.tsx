@@ -20,6 +20,11 @@ import { Toast } from "@/components/toast";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
 import { useMail } from "@/lib/mail-context";
+import {
+  adminLogin as verifyAdminLogin,
+  fetchSettings as fetchWorkerSettings,
+  type WorkerProfile,
+} from "@/lib/api";
 import { useThemeContext, type ThemePreference } from "@/lib/theme-provider";
 import * as Haptics from "expo-haptics";
 
@@ -45,6 +50,46 @@ function getThemeLabel(scheme: ThemePreference) {
   return scheme === "dark" ? "深色" : "浅色";
 }
 
+function createDraftWorkerProfile(index = 1): WorkerProfile {
+  return {
+    id: `draft_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: `账号 ${index}`,
+    workerUrl: "",
+    adminPassword: "",
+    sitePassword: "",
+    domains: [],
+    domainLabels: [],
+    defaultDomains: [],
+    randomSubdomainDomains: [],
+    status: "unchecked",
+  };
+}
+
+function normalizeDraftWorkerProfile(profile: WorkerProfile): WorkerProfile {
+  return {
+    ...profile,
+    name: profile.name.trim() || "未命名账号",
+    workerUrl: profile.workerUrl.trim().replace(/\/+$/, ""),
+    adminPassword: profile.adminPassword.trim(),
+    sitePassword: (profile.sitePassword || "").trim(),
+    domains: Array.isArray(profile.domains) ? profile.domains : [],
+    domainLabels: Array.isArray(profile.domainLabels) ? profile.domainLabels : [],
+    defaultDomains: Array.isArray(profile.defaultDomains) ? profile.defaultDomains : [],
+    randomSubdomainDomains: Array.isArray(profile.randomSubdomainDomains)
+      ? profile.randomSubdomainDomains
+      : [],
+  };
+}
+
+function getWorkerProfileTestFingerprint(profile: WorkerProfile) {
+  const normalized = normalizeDraftWorkerProfile(profile);
+  return [
+    normalized.workerUrl,
+    normalized.adminPassword,
+    normalized.sitePassword || "",
+  ].join("\n");
+}
+
 export default function SettingsScreen() {
   const colors = useColors();
   const router = useRouter();
@@ -52,7 +97,7 @@ export default function SettingsScreen() {
   const appVersion = Constants.expoConfig?.version ?? "1.0.1";
   const {
     state,
-    updateConfig,
+    updateWorkerProfiles,
     loadSettings,
     loadUserSettings,
     changePassword,
@@ -63,11 +108,18 @@ export default function SettingsScreen() {
     activeAccount,
   } = useMail();
 
-  const [workerUrl, setWorkerUrl] = useState(state.workerUrl);
-  const [adminPassword, setAdminPassword] = useState(state.adminPassword);
-  const [sitePassword, setSitePassword] = useState(state.sitePassword);
+  const [workerProfiles, setWorkerProfiles] = useState<WorkerProfile[]>(() =>
+    state.workerProfiles.length > 0
+      ? state.workerProfiles
+      : [createDraftWorkerProfile(1)]
+  );
+  const workerProfilesRef = useRef(workerProfiles);
+  const [activeWorkerProfileId, setActiveWorkerProfileId] = useState(
+    state.activeWorkerProfileId || workerProfiles[0]?.id || ""
+  );
   const [refreshInterval, setRefreshInterval] = useState(state.refreshInterval);
   const [isSaving, setIsSaving] = useState(false);
+  const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
   const [showRawResponse, setShowRawResponse] = useState(false);
 
   // Password change
@@ -91,6 +143,10 @@ export default function SettingsScreen() {
   const [isEnteringAdmin, setIsEnteringAdmin] = useState(false);
   const tapCountRef = useRef(0);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    workerProfilesRef.current = workerProfiles;
+  }, [workerProfiles]);
 
   const handleLogoTap = useCallback(() => {
     tapCountRef.current += 1;
@@ -130,13 +186,31 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     if (state.isInitialized) {
-      setWorkerUrl(state.workerUrl);
-      setAdminPassword(state.adminPassword);
-      setSitePassword(state.sitePassword);
+      const nextProfiles =
+        state.workerProfiles.length > 0
+          ? state.workerProfiles
+          : state.workerUrl
+            ? [
+                {
+                  ...createDraftWorkerProfile(1),
+                  id: "legacy_default",
+                  name: "默认账号",
+                  workerUrl: state.workerUrl,
+                  adminPassword: state.adminPassword,
+                  sitePassword: state.sitePassword,
+                },
+              ]
+            : [createDraftWorkerProfile(1)];
+      setWorkerProfiles(nextProfiles);
+      setActiveWorkerProfileId(
+        state.activeWorkerProfileId || nextProfiles[0]?.id || ""
+      );
       setRefreshInterval(state.refreshInterval);
     }
   }, [
     state.isInitialized,
+    state.workerProfiles,
+    state.activeWorkerProfileId,
     state.workerUrl,
     state.adminPassword,
     state.sitePassword,
@@ -155,28 +229,96 @@ export default function SettingsScreen() {
     }
   }, [state.userSettings?.auto_reply]);
 
-  const handleSave = useCallback(async () => {
-    const trimmedWorkerUrl = workerUrl.trim();
-    const trimmedAdminPassword = adminPassword.trim();
+  const updateWorkerProfileDraft = useCallback(
+    (profileId: string, patch: Partial<WorkerProfile>) => {
+      setWorkerProfiles((prev) =>
+        prev.map((profile) =>
+          profile.id === profileId ? { ...profile, ...patch } : profile
+        )
+      );
+    },
+    []
+  );
 
-    if (!trimmedWorkerUrl) {
-      Alert.alert("提示", "请填入 Worker 地址");
+  const handleAddWorkerProfile = useCallback(() => {
+    setWorkerProfiles((prev) => {
+      const next = [...prev, createDraftWorkerProfile(prev.length + 1)];
+      if (!activeWorkerProfileId) {
+        setActiveWorkerProfileId(next[0].id);
+      }
+      return next;
+    });
+  }, [activeWorkerProfileId]);
+
+  const handleDeleteWorkerProfile = useCallback(
+    (profileId: string) => {
+      if (workerProfiles.length <= 1) {
+        Alert.alert("提示", "至少保留一个 Worker 配置");
+        return;
+      }
+      const profile = workerProfiles.find((item) => item.id === profileId);
+      Alert.alert("删除 Worker", `删除「${profile?.name || "该账号"}」配置？`, [
+        { text: "取消", style: "cancel" },
+        {
+          text: "删除",
+          style: "destructive",
+          onPress: () => {
+            setWorkerProfiles((prev) => {
+              const next = prev.filter((item) => item.id !== profileId);
+              if (activeWorkerProfileId === profileId) {
+                setActiveWorkerProfileId(next[0]?.id || "");
+              }
+              return next;
+            });
+          },
+        },
+      ]);
+    },
+    [activeWorkerProfileId, workerProfiles]
+  );
+
+  const handleSave = useCallback(async () => {
+    const cleanedProfiles = workerProfiles
+      .map(normalizeDraftWorkerProfile)
+      .filter((profile) => profile.workerUrl || profile.adminPassword || profile.sitePassword);
+
+    if (cleanedProfiles.length === 0) {
+      Alert.alert("提示", "请至少配置一个 Worker");
       return;
     }
-    if (!trimmedAdminPassword) {
-      Alert.alert("提示", "请填入管理员密码");
-      return;
+
+    for (const profile of cleanedProfiles) {
+      if (!profile.workerUrl) {
+        Alert.alert("提示", `请填入「${profile.name}」的 Worker 地址`);
+        return;
+      }
+      if (!profile.adminPassword) {
+        Alert.alert("提示", `请填入「${profile.name}」的管理员密码`);
+        return;
+      }
     }
+
+    const urlSet = new Set<string>();
+    for (const profile of cleanedProfiles) {
+      const key = profile.workerUrl.toLowerCase();
+      if (urlSet.has(key)) {
+        Alert.alert("提示", `Worker 地址重复：${profile.workerUrl}`);
+        return;
+      }
+      urlSet.add(key);
+    }
+
+    const nextActiveId =
+      cleanedProfiles.find((profile) => profile.id === activeWorkerProfileId)?.id ||
+      cleanedProfiles[0].id;
+    const activeProfile = cleanedProfiles.find(
+      (profile) => profile.id === nextActiveId
+    )!;
 
     setIsSaving(true);
     try {
-      await updateConfig({
-        workerUrl: trimmedWorkerUrl,
-        adminPassword: trimmedAdminPassword,
-        sitePassword: sitePassword.trim(),
-        refreshInterval,
-      });
-      await enterAdminMode(trimmedAdminPassword);
+      await updateWorkerProfiles(cleanedProfiles, nextActiveId, refreshInterval);
+      await enterAdminMode(activeProfile.adminPassword);
       if (Platform.OS !== "web") {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       }
@@ -190,48 +332,82 @@ export default function SettingsScreen() {
       setIsSaving(false);
     }
   }, [
-    workerUrl,
-    adminPassword,
-    sitePassword,
+    activeWorkerProfileId,
     refreshInterval,
-    updateConfig,
+    workerProfiles,
+    updateWorkerProfiles,
     enterAdminMode,
     loadSettings,
     router,
   ]);
 
-  const handleTestConnection = useCallback(async () => {
-    if (!workerUrl.trim()) {
+  const handleTestConnection = useCallback(async (profileId: string) => {
+    const profile = workerProfiles.find((item) => item.id === profileId);
+    if (!profile) return;
+    const draft = normalizeDraftWorkerProfile(profile);
+    const testFingerprint = getWorkerProfileTestFingerprint(draft);
+    if (!draft.workerUrl) {
       Alert.alert("提示", "请先填入 Worker 地址");
       return;
     }
+    if (!draft.adminPassword) {
+      Alert.alert("提示", "请先填入管理员密码");
+      return;
+    }
+    setTestingProfileId(profileId);
     try {
-      await updateConfig({
-        workerUrl: workerUrl.trim(),
-        adminPassword: adminPassword.trim(),
-        sitePassword: sitePassword.trim(),
-        refreshInterval,
-      });
-      const settings = await loadSettings({ throwOnError: true });
-      const domainCount = settings?.domains?.length || 0;
+      const configOverride = {
+        workerUrl: draft.workerUrl,
+        adminPassword: draft.adminPassword,
+        sitePassword: draft.sitePassword || "",
+        lang: "zh",
+      };
+      const settings = await fetchWorkerSettings({ configOverride });
+      await verifyAdminLogin(draft.adminPassword, { configOverride });
+      const domainCount = settings.domains?.length || 0;
+      const checkedProfile: Partial<WorkerProfile> = {
+        domains: settings.domains || [],
+        domainLabels: settings.domainLabels || [],
+        defaultDomains: settings.defaultDomains || [],
+        randomSubdomainDomains: settings.randomSubdomainDomains || [],
+        status: "connected",
+        lastCheckedAt: new Date().toISOString(),
+        errorMessage: undefined,
+      };
+      const latest = workerProfilesRef.current.find((item) => item.id === profileId);
+      if (!latest || getWorkerProfileTestFingerprint(latest) !== testFingerprint) {
+        return;
+      }
+      updateWorkerProfileDraft(profileId, checkedProfile);
       if (domainCount > 0) {
         Alert.alert(
           "连接成功",
-          `已连接到 Worker，检测到 ${domainCount} 个可用域名：\n${settings?.domains?.join(", ")}`
+          `「${draft.name}」检测到 ${domainCount} 个可用域名：\n${settings.domains?.join(", ")}`
         );
       } else {
         Alert.alert(
           "连接成功但域名为空",
-          "服务器响应正常，但 domains 为空。\n\n请检查 Cloudflare Worker 的 DOMAINS 环境变量是否已配置为 JSON 数组（例如 [\"a.com\", \"b.com\"]）。\n\n点击下方「查看原始响应」可看到详细字段。"
+          `「${draft.name}」响应正常，但 domains 为空。\n\n请检查该 Worker 的 DOMAINS 环境变量。`
         );
       }
     } catch (err: any) {
+      const latest = workerProfilesRef.current.find((item) => item.id === profileId);
+      if (!latest || getWorkerProfileTestFingerprint(latest) !== testFingerprint) {
+        return;
+      }
+      updateWorkerProfileDraft(profileId, {
+        status: "error",
+        lastCheckedAt: new Date().toISOString(),
+        errorMessage: err.message || "无法连接",
+      });
       Alert.alert(
         "连接失败",
-        `${err.message || "无法连接"}\n\n请检查:\n1. Worker 地址是否正确\n2. 是否需要站点密码\n3. CORS 设置`
+        `${err.message || "无法连接"}\n\n请检查:\n1. Worker 地址是否正确\n2. 是否需要站点密码\n3. 管理员密码是否正确`
       );
+    } finally {
+      setTestingProfileId(null);
     }
-  }, [workerUrl, adminPassword, sitePassword, refreshInterval, updateConfig, loadSettings]);
+  }, [updateWorkerProfileDraft, workerProfiles]);
 
   const handleReturnAdmin = useCallback(() => {
     if (router.canGoBack()) {
@@ -284,77 +460,230 @@ export default function SettingsScreen() {
         </Text>
 
         {/* Server Config Section */}
-        <Text style={[styles.sectionTitle, { color: colors.muted }]}>
-          Workers 配置
-        </Text>
-
-        <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-          <View style={[styles.fieldGroup, { borderBottomColor: colors.border }]}>
-            <View style={styles.fieldHeader}>
-              <IconSymbol name="globe" size={18} color={colors.primary} />
-              <Text style={[styles.fieldLabel, { color: colors.foreground }]}>
-                Worker 地址
-              </Text>
-            </View>
-            <TextInput
-              style={[styles.fieldInput, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.background }]}
-              value={workerUrl}
-              onChangeText={setWorkerUrl}
-              placeholder="https://your-worker.example.com"
-              placeholderTextColor={colors.muted}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-            />
-            <Text style={[styles.fieldHint, { color: colors.muted }]}>
-              你的 Cloudflare Worker 部署地址
-            </Text>
-          </View>
-
-          <View style={[styles.fieldGroup, { borderBottomColor: colors.border }]}>
-            <View style={styles.fieldHeader}>
-              <IconSymbol name="key.fill" size={18} color={colors.primary} />
-              <Text style={[styles.fieldLabel, { color: colors.foreground }]}>
-                管理员密码
-              </Text>
-            </View>
-            <TextInput
-              style={[styles.fieldInput, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.background }]}
-              value={adminPassword}
-              onChangeText={setAdminPassword}
-              placeholder="管理员密码（必填）"
-              placeholderTextColor={colors.muted}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <Text style={[styles.fieldHint, { color: colors.muted }]}>
-              用于进入管理员后台和调用 Admin API
-            </Text>
-          </View>
-
-          <View style={styles.fieldGroup}>
-            <View style={styles.fieldHeader}>
-              <IconSymbol name="lock.fill" size={18} color={colors.primary} />
-              <Text style={[styles.fieldLabel, { color: colors.foreground }]}>
-                站点密码
-              </Text>
-            </View>
-            <TextInput
-              style={[styles.fieldInput, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.background }]}
-              value={sitePassword}
-              onChangeText={setSitePassword}
-              placeholder="站点访问密码（可选）"
-              placeholderTextColor={colors.muted}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <Text style={[styles.fieldHint, { color: colors.muted }]}>
-              若 Worker 设置了 PASSWORDS，需要填入
-            </Text>
-          </View>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={[styles.sectionTitle, styles.sectionTitleInline, { color: colors.muted }]}>
+            Workers 配置
+          </Text>
+          <Pressable
+            onPress={handleAddWorkerProfile}
+            style={({ pressed }) => [
+              styles.smallPillButton,
+              {
+                backgroundColor: `${colors.primary}12`,
+                borderColor: `${colors.primary}28`,
+                opacity: pressed ? 0.75 : 1,
+              },
+            ]}
+          >
+            <IconSymbol name="plus.circle.fill" size={14} color={colors.primary} />
+            <Text style={[styles.smallPillButtonText, { color: colors.primary }]}>添加 Worker</Text>
+          </Pressable>
         </View>
+
+        {workerProfiles.map((profile, index) => {
+          const isActive = activeWorkerProfileId === profile.id;
+          const isTesting = testingProfileId === profile.id;
+          const domainText = profile.domains?.length
+            ? profile.domains.join(", ")
+            : profile.status === "connected"
+              ? "未检测到域名"
+              : "尚未刷新域名";
+          const statusColor =
+            profile.status === "connected"
+              ? colors.success
+              : profile.status === "error"
+                ? colors.error
+                : colors.muted;
+          const statusLabel =
+            profile.status === "connected"
+              ? "已连接"
+              : profile.status === "error"
+                ? "连接失败"
+                : "未检测";
+
+          return (
+            <View
+              key={profile.id}
+              style={[
+                styles.card,
+                styles.workerProfileCard,
+                {
+                  backgroundColor: colors.surface,
+                  borderColor: isActive ? colors.primary : colors.border,
+                },
+              ]}
+            >
+              <View style={styles.workerProfileHeader}>
+                <View style={styles.workerProfileTitleWrap}>
+                  <Text style={[styles.workerProfileTitle, { color: colors.foreground }]}>
+                    {profile.name?.trim() || `账号 ${index + 1}`}
+                  </Text>
+                  <Text style={[styles.workerProfileStatus, { color: statusColor }]}>
+                    {isActive ? "当前 · " : ""}{statusLabel}
+                  </Text>
+                </View>
+                <View style={styles.workerProfileActions}>
+                  {!isActive ? (
+                    <Pressable
+                      onPress={() => setActiveWorkerProfileId(profile.id)}
+                      style={({ pressed }) => [
+                        styles.workerTinyButton,
+                        {
+                          borderColor: colors.primary,
+                          opacity: pressed ? 0.7 : 1,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.workerTinyButtonText, { color: colors.primary }]}>设为当前</Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable
+                    onPress={() => handleDeleteWorkerProfile(profile.id)}
+                    disabled={workerProfiles.length <= 1}
+                    style={({ pressed }) => [
+                      styles.workerIconButton,
+                      {
+                        borderColor: colors.border,
+                        opacity: workerProfiles.length <= 1 ? 0.35 : pressed ? 0.65 : 1,
+                      },
+                    ]}
+                  >
+                    <IconSymbol name="trash.fill" size={14} color={colors.error} />
+                  </Pressable>
+                </View>
+              </View>
+
+              <View style={[styles.fieldGroup, { borderBottomColor: colors.border }]}>
+                <View style={styles.fieldHeader}>
+                  <IconSymbol name="person.crop.circle.fill" size={18} color={colors.primary} />
+                  <Text style={[styles.fieldLabel, { color: colors.foreground }]}>账号名称</Text>
+                </View>
+                <TextInput
+                  style={[
+                    styles.fieldInput,
+                    {
+                      color: colors.foreground,
+                      borderColor: colors.border,
+                      backgroundColor: colors.background,
+                      opacity: isTesting ? 0.62 : 1,
+                    },
+                  ]}
+                  value={profile.name}
+                  editable={!isTesting}
+                  onChangeText={(text) => updateWorkerProfileDraft(profile.id, { name: text })}
+                  placeholder="例如：Cloudflare 账号 A"
+                  placeholderTextColor={colors.muted}
+                />
+              </View>
+
+              <View style={[styles.fieldGroup, { borderBottomColor: colors.border }]}>
+                <View style={styles.fieldHeader}>
+                  <IconSymbol name="globe" size={18} color={colors.primary} />
+                  <Text style={[styles.fieldLabel, { color: colors.foreground }]}>Worker 地址</Text>
+                </View>
+                <TextInput
+                  style={[
+                    styles.fieldInput,
+                    {
+                      color: colors.foreground,
+                      borderColor: colors.border,
+                      backgroundColor: colors.background,
+                      opacity: isTesting ? 0.62 : 1,
+                    },
+                  ]}
+                  value={profile.workerUrl}
+                  editable={!isTesting}
+                  onChangeText={(text) => updateWorkerProfileDraft(profile.id, { workerUrl: text, status: "unchecked" })}
+                  placeholder="https://your-worker.example.com"
+                  placeholderTextColor={colors.muted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                />
+              </View>
+
+              <View style={[styles.fieldGroup, { borderBottomColor: colors.border }]}>
+                <View style={styles.fieldHeader}>
+                  <IconSymbol name="key.fill" size={18} color={colors.primary} />
+                  <Text style={[styles.fieldLabel, { color: colors.foreground }]}>管理员密码</Text>
+                </View>
+                <TextInput
+                  style={[
+                    styles.fieldInput,
+                    {
+                      color: colors.foreground,
+                      borderColor: colors.border,
+                      backgroundColor: colors.background,
+                      opacity: isTesting ? 0.62 : 1,
+                    },
+                  ]}
+                  value={profile.adminPassword}
+                  editable={!isTesting}
+                  onChangeText={(text) => updateWorkerProfileDraft(profile.id, { adminPassword: text, status: "unchecked" })}
+                  placeholder="管理员密码（必填）"
+                  placeholderTextColor={colors.muted}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              </View>
+
+              <View style={[styles.fieldGroup, { borderBottomColor: colors.border }]}>
+                <View style={styles.fieldHeader}>
+                  <IconSymbol name="lock.fill" size={18} color={colors.primary} />
+                  <Text style={[styles.fieldLabel, { color: colors.foreground }]}>站点密码</Text>
+                </View>
+                <TextInput
+                  style={[
+                    styles.fieldInput,
+                    {
+                      color: colors.foreground,
+                      borderColor: colors.border,
+                      backgroundColor: colors.background,
+                      opacity: isTesting ? 0.62 : 1,
+                    },
+                  ]}
+                  value={profile.sitePassword || ""}
+                  editable={!isTesting}
+                  onChangeText={(text) => updateWorkerProfileDraft(profile.id, { sitePassword: text, status: "unchecked" })}
+                  placeholder="站点访问密码（可选）"
+                  placeholderTextColor={colors.muted}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              </View>
+
+              <View style={styles.workerDomainBox}>
+                <Text style={[styles.fieldHint, { color: colors.muted }]} numberOfLines={3}>
+                  域名：{domainText}
+                </Text>
+                {profile.errorMessage ? (
+                  <Text style={[styles.fieldHint, { color: colors.error }]} numberOfLines={2}>
+                    {profile.errorMessage}
+                  </Text>
+                ) : null}
+                <Pressable
+                  onPress={() => handleTestConnection(profile.id)}
+                  disabled={isTesting}
+                  style={({ pressed }) => [
+                    styles.workerTestButton,
+                    {
+                      backgroundColor: isTesting ? colors.muted : colors.primary,
+                      opacity: pressed ? 0.82 : 1,
+                    },
+                  ]}
+                >
+                  {isTesting ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.workerTestButtonText}>测试连接 / 刷新域名</Text>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          );
+        })}
 
         {/* Refresh Interval */}
         <Text style={[styles.sectionTitle, { color: colors.muted }]}>
@@ -473,21 +802,6 @@ export default function SettingsScreen() {
           >
             <Text style={styles.primaryButtonText}>
               {isSaving ? "保存中..." : "保存并进入管理后台"}
-            </Text>
-          </Pressable>
-
-          <Pressable
-            onPress={handleTestConnection}
-            style={({ pressed }) => [
-              styles.secondaryButton,
-              {
-                borderColor: colors.primary,
-                opacity: pressed ? 0.8 : 1,
-              },
-            ]}
-          >
-            <Text style={[styles.secondaryButtonText, { color: colors.primary }]}>
-              测试连接
             </Text>
           </Pressable>
         </View>
@@ -976,11 +1290,102 @@ const styles = StyleSheet.create({
     marginTop: 24,
     marginBottom: 10,
   },
+  sectionHeaderRow: {
+    marginTop: 24,
+    marginBottom: 10,
+    paddingHorizontal: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  sectionTitleInline: {
+    paddingHorizontal: 0,
+    marginTop: 0,
+    marginBottom: 0,
+  },
+  smallPillButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  smallPillButtonText: {
+    fontSize: 12,
+    fontWeight: "800",
+  },
   card: {
     marginHorizontal: 16,
     borderRadius: 12,
     borderWidth: 1,
     overflow: "hidden",
+  },
+  workerProfileCard: {
+    marginBottom: 12,
+  },
+  workerProfileHeader: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  workerProfileTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  workerProfileTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  workerProfileStatus: {
+    marginTop: 3,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  workerProfileActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  workerTinyButton: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  workerTinyButtonText: {
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  workerIconButton: {
+    width: 32,
+    height: 32,
+    borderWidth: 1,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  workerDomainBox: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 14,
+    gap: 10,
+  },
+  workerTestButton: {
+    minHeight: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  workerTestButtonText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "800",
   },
   fieldGroup: {
     padding: 16,

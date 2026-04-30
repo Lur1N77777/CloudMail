@@ -85,6 +85,7 @@ import {
   adminBulkExecute,
   adminBulkPreview,
   adminSendMail,
+  buildWorkerDomainEntries,
   createAddress,
   fetchAdminStatistics,
   fetchAdminUserAddresses,
@@ -98,6 +99,7 @@ import {
   type AdminUser,
   type ParsedMail,
   type RawMail,
+  type WorkerDomainEntry,
 } from "@/lib/api";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { setAdminMailEntry } from "@/lib/admin-mail-store";
@@ -512,8 +514,12 @@ const adminMailSearchDatasetCache = new Map<
   { count: number; data: ParsedMail[]; fetchedAt: number }
 >();
 const adminParsedMailRowCache = new Map<string, ParsedMail>();
-let adminStatsPanelCache: AdminStatsCacheEntry | null = null;
+const adminStatsPanelCache = new Map<string, AdminStatsCacheEntry>();
 const adminAddressesPanelCache = new Map<string, AdminAddressesPanelCacheEntry>();
+
+function normalizeAdminWorkerScope(workerScope?: string) {
+  return (workerScope || "default").trim().replace(/\/+$/, "").toLowerCase() || "default";
+}
 
 function normalizeAdminMailQuery(value?: string) {
   return (value || "").trim().toLowerCase();
@@ -521,27 +527,37 @@ function normalizeAdminMailQuery(value?: string) {
 
 function buildAdminMailCacheKey(
   kind: AdminMailCacheKind,
-  address?: string
+  address?: string,
+  workerScope?: string
 ) {
-  return `${kind}:${normalizeAdminMailQuery(address) || "*"}`;
+  return `${normalizeAdminWorkerScope(workerScope)}:${kind}:${normalizeAdminMailQuery(address) || "*"}`;
 }
 
-function clearAdminMailCacheKinds(kinds: AdminMailCacheKind[]) {
+function buildAdminMailSearchCacheKey(kind: AdminMailCacheKind, workerScope?: string) {
+  return `${normalizeAdminWorkerScope(workerScope)}:${kind}`;
+}
+
+function clearAdminMailCacheKinds(kinds: AdminMailCacheKind[], workerScope?: string) {
+  const scope = workerScope ? normalizeAdminWorkerScope(workerScope) : "";
   for (const key of adminMailPanelCache.keys()) {
-    if (kinds.some((kind) => key.startsWith(`${kind}:`))) {
+    if (kinds.some((kind) => key.startsWith(scope ? `${scope}:${kind}:` : `${kind}:`) || (!scope && key.includes(`:${kind}:`)))) {
       adminMailPanelCache.delete(key);
     }
   }
-  for (const kind of kinds) {
-    adminMailSearchDatasetCache.delete(kind);
+  for (const key of adminMailSearchDatasetCache.keys()) {
+    if (kinds.some((kind) => key === (scope ? `${scope}:${kind}` : kind) || (!scope && key.endsWith(`:${kind}`)))) {
+      adminMailSearchDatasetCache.delete(key);
+    }
   }
 }
 
 function buildAdminParsedMailCacheKey(
   kind: "inbox" | "sendbox" | "unknown",
-  row: RawMail
+  row: RawMail,
+  workerScope?: string
 ) {
   return [
+    normalizeAdminWorkerScope(workerScope),
     kind,
     row.id,
     row.message_id || "",
@@ -552,11 +568,23 @@ function buildAdminParsedMailCacheKey(
   ].join(":");
 }
 
-function buildAdminAddressesCacheKey(query?: string, userId: "all" | string = "all") {
-  return `${normalizeSearchKeyword(query) || "*"}:${userId || "all"}`;
+function buildAdminAddressesCacheKey(
+  query?: string,
+  userId: "all" | string = "all",
+  workerScope?: string
+) {
+  return `${normalizeAdminWorkerScope(workerScope)}:${normalizeSearchKeyword(query) || "*"}:${userId || "all"}`;
 }
 
 function clearAdminAddressesPanelCache() {
+  adminAddressesPanelCache.clear();
+}
+
+function clearAllAdminPanelCaches() {
+  adminMailPanelCache.clear();
+  adminMailSearchDatasetCache.clear();
+  adminParsedMailRowCache.clear();
+  adminStatsPanelCache.clear();
   adminAddressesPanelCache.clear();
 }
 
@@ -569,11 +597,12 @@ function formatAdminPanelRefreshTime(date = new Date()) {
 
 async function parseAdminMailRowsCached(
   kind: AdminMailPanelKind,
-  rows: RawMail[]
+  rows: RawMail[],
+  workerScope?: string
 ) {
   return Promise.all(
     rows.map(async (m: RawMail) => {
-      const cacheKey = buildAdminParsedMailCacheKey(kind, m);
+      const cacheKey = buildAdminParsedMailCacheKey(kind, m, workerScope);
       const cached = adminParsedMailRowCache.get(cacheKey);
       if (cached) {
         return cached;
@@ -606,7 +635,10 @@ async function parseAdminMailRowsCached(
   );
 }
 
-async function fetchAdminSpamMailboxDataset(blockedSenders: Set<string>) {
+async function fetchAdminSpamMailboxDataset(
+  blockedSenders: Set<string>,
+  workerScope?: string
+) {
   if (blockedSenders.size === 0) {
     return { count: 0, data: [] };
   }
@@ -633,7 +665,7 @@ async function fetchAdminSpamMailboxDataset(blockedSenders: Set<string>) {
     let nextOffset = 0;
     while (true) {
       const page = await source.fetchPage(nextOffset);
-      const parsed = await parseAdminMailRowsCached(source.kind, page.results);
+      const parsed = await parseAdminMailRowsCached(source.kind, page.results, workerScope);
       for (const mail of parsed) {
         if (isAdminMailSpamBySenderSet(mail, blockedSenders)) {
           merged.set(`${source.kind}:${mail.id}`, mail);
@@ -721,7 +753,7 @@ function HighlightText({
 export default function AdminScreen() {
   const colors = useColors();
   const router = useRouter();
-  const { state, clearError, clearSuccess } = useMail();
+  const { state, clearError, clearSuccess, switchWorkerProfile, loadSettings } = useMail();
   const { colorScheme, themePreference, setThemePreference, lastDarkPreference } =
     useThemeContext();
   const [tab, setTab] = useState<AdminTab>(ADMIN_INITIAL_TAB);
@@ -732,6 +764,10 @@ export default function AdminScreen() {
     createMountedTabsAround(ADMIN_INITIAL_TAB_INDEX)
   );
   const [miniToastMessage, setMiniToastMessage] = useState<string | null>(null);
+  const [workerMenu, setWorkerMenu] = useState<{
+    anchor: FloatingActionMenuAnchor;
+    items: FloatingActionMenuItem[];
+  } | null>(null);
   const [segmentTrackWidth, setSegmentTrackWidth] = useState(0);
   const [pagerWidth, setPagerWidth] = useState(0);
   const activeTabIndex = useMemo(
@@ -751,6 +787,18 @@ export default function AdminScreen() {
   const pagerKeyboardSuspended = useSharedValue(false);
   const activeTabIndexRef = useRef(activeTabIndex);
   const requestedTabIndexRef = useRef(activeTabIndex);
+  const adminRootRef = useRef<React.ElementRef<typeof View>>(null);
+  const workerSwitchRef = useRef<React.ElementRef<typeof View>>(null);
+  const activeWorkerKey = state.workerUrl || state.activeWorkerProfileId || "default";
+  const activeWorkerProfile = useMemo(
+    () =>
+      state.workerProfiles.find(
+        (profile) => profile.id === state.activeWorkerProfileId
+      ) || state.workerProfiles[0],
+    [state.activeWorkerProfileId, state.workerProfiles]
+  );
+  const activeWorkerLabel =
+    activeWorkerProfile?.name || (state.workerUrl ? "当前 Worker" : "未配置");
 
   const segmentMetrics = useMemo(() => {
     if (!segmentTrackWidth) return { width: 0 };
@@ -1097,6 +1145,62 @@ export default function AdminScreen() {
     router.push("/settings");
   }, [router]);
 
+  const closeWorkerMenu = useCallback(() => {
+    setWorkerMenu(null);
+  }, []);
+
+  const handleSwitchWorker = useCallback(
+    async (profileId: string) => {
+      if (!profileId || profileId === state.activeWorkerProfileId) return;
+      clearAllAdminPanelCaches();
+      await switchWorkerProfile(profileId);
+      setMiniToastMessage("已切换 Worker");
+      void loadSettings();
+    },
+    [loadSettings, state.activeWorkerProfileId, switchWorkerProfile]
+  );
+
+  const openWorkerMenu = useCallback(
+    (event: GestureResponderEvent) => {
+      if (state.workerProfiles.length <= 0) return;
+      const pageX = event.nativeEvent.pageX;
+      const pageY = event.nativeEvent.pageY;
+      const items: FloatingActionMenuItem[] = state.workerProfiles.map((profile) => ({
+        key: profile.id,
+        label:
+          profile.id === state.activeWorkerProfileId
+            ? `${profile.name} · 当前`
+            : profile.name,
+        subtitle:
+          profile.domains?.length > 0
+            ? profile.domains.slice(0, 3).join(" / ")
+            : profile.workerUrl,
+        icon: profile.id === state.activeWorkerProfileId ? "checkmark.circle.fill" : "globe",
+        disabled: profile.id === state.activeWorkerProfileId,
+        onPress: () => {
+          void handleSwitchWorker(profile.id);
+        },
+      }));
+
+      const rootNode = adminRootRef.current;
+      if (!rootNode) {
+        setWorkerMenu({ anchor: { x: pageX, y: pageY }, items });
+        return;
+      }
+      rootNode.measureInWindow((rootX, rootY) => {
+        setWorkerMenu({
+          anchor: { x: pageX - rootX, y: pageY - rootY },
+          items,
+        });
+      });
+    },
+    [
+      handleSwitchWorker,
+      state.activeWorkerProfileId,
+      state.workerProfiles,
+    ]
+  );
+
   const showMiniToast = useCallback((message: string) => {
     setMiniToastMessage(message);
   }, []);
@@ -1110,15 +1214,18 @@ export default function AdminScreen() {
         if (pageTab === "stats") {
           content = (
             <MemoStatsPanel
+              key={`stats-${activeWorkerKey}`}
               colors={colors}
               onNavigate={selectTab}
               isActive={isPageActive}
               shouldWarm={warmTabs.stats}
+              workerScope={activeWorkerKey}
             />
           );
         } else if (pageTab === "addresses") {
           content = (
             <MemoAddressesPanel
+              key={`addresses-${activeWorkerKey}`}
               colors={colors}
               onMiniToast={showMiniToast}
               isActive={isPageActive}
@@ -1128,6 +1235,7 @@ export default function AdminScreen() {
         } else if (pageTab === "mails") {
           content = (
             <MemoMailsPanel
+              key={`mails-${activeWorkerKey}`}
               colors={colors}
               kind="inbox"
               onMiniToast={showMiniToast}
@@ -1138,6 +1246,7 @@ export default function AdminScreen() {
         } else if (pageTab === "sendbox") {
           content = (
             <MemoMailsPanel
+              key={`sendbox-${activeWorkerKey}`}
               colors={colors}
               kind="sendbox"
               onMiniToast={showMiniToast}
@@ -1148,6 +1257,7 @@ export default function AdminScreen() {
         } else if (pageTab === "unknown") {
           content = (
             <MemoMailsPanel
+              key={`unknown-${activeWorkerKey}`}
               colors={colors}
               kind="unknown"
               onMiniToast={showMiniToast}
@@ -1156,7 +1266,7 @@ export default function AdminScreen() {
             />
           );
         } else if (pageTab === "send") {
-          content = <MemoSendAsPanel colors={colors} />;
+          content = <MemoSendAsPanel key={`send-${activeWorkerKey}`} colors={colors} />;
         }
       }
 
@@ -1170,7 +1280,7 @@ export default function AdminScreen() {
         </View>
       );
     },
-    [colors, mountedTabs, pagerWidth, selectTab, showMiniToast, tab, warmTabs]
+    [activeWorkerKey, colors, mountedTabs, pagerWidth, selectTab, showMiniToast, tab, warmTabs]
   );
 
   if (!state.isInitialized || !state.isAdminMode) {
@@ -1191,12 +1301,34 @@ export default function AdminScreen() {
           gestureEnabled: activeTabIndex === 0,
         }}
       />
-      <View collapsable={false} style={styles.adminScreenRoot}>
+      <View ref={adminRootRef} collapsable={false} style={styles.adminScreenRoot}>
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
         <View style={styles.headerLeft}>
           <Text style={[styles.headerTitle, { color: colors.foreground }]}>
             管理员系统
           </Text>
+          <View ref={workerSwitchRef} collapsable={false}>
+            <Pressable
+              onPress={openWorkerMenu}
+              style={({ pressed }) => [
+                styles.headerWorkerButton,
+                {
+                  backgroundColor: `${colors.primary}10`,
+                  borderColor: `${colors.primary}24`,
+                  opacity: pressed ? 0.78 : 1,
+                },
+              ]}
+            >
+              <IconSymbol name="globe" size={13} color={colors.primary} />
+              <Text
+                style={[styles.headerWorkerText, { color: colors.primary }]}
+                numberOfLines={1}
+              >
+                {activeWorkerLabel}
+              </Text>
+              <IconSymbol name="chevron.down" size={12} color={colors.primary} />
+            </Pressable>
+          </View>
         </View>
         <View style={styles.headerActions}>
           <Pressable
@@ -1340,6 +1472,13 @@ export default function AdminScreen() {
         </GestureDetector>
       </SwipeableScreenContext.Provider>
 
+      <FloatingActionMenu
+        visible={!!workerMenu}
+        anchor={workerMenu?.anchor ?? null}
+        colors={colors}
+        items={workerMenu?.items ?? []}
+        onClose={closeWorkerMenu}
+      />
       <MiniToast
         message={miniToastMessage}
         onDismiss={() => setMiniToastMessage(null)}
@@ -1361,11 +1500,13 @@ function StatsPanel({
   onNavigate,
   isActive,
   shouldWarm,
+  workerScope,
 }: {
   colors: ReturnType<typeof useColors>;
   onNavigate: (tab: AdminTab) => void;
   isActive: boolean;
   shouldWarm: boolean;
+  workerScope: string;
 }) {
   const [stats, setStats] = useState<AdminStatistics | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -1383,11 +1524,11 @@ function StatsPanel({
 
   const commitStats = useCallback((nextStats: AdminStatistics, options?: { defer?: boolean }) => {
     const updatedLabel = formatAdminPanelRefreshTime();
-    adminStatsPanelCache = {
+    adminStatsPanelCache.set(normalizeAdminWorkerScope(workerScope), {
       data: nextStats,
       fetchedAt: Date.now(),
       updatedLabel,
-    };
+    });
     const applyState = () => {
       setStats(nextStats);
       setLastUpdated(updatedLabel);
@@ -1398,15 +1539,16 @@ function StatsPanel({
     } else {
       applyState();
     }
-  }, []);
+  }, [workerScope]);
 
   const hydrateStatsCache = useCallback(() => {
-    if (!adminStatsPanelCache) return false;
-    setStats(adminStatsPanelCache.data);
-    setLastUpdated(adminStatsPanelCache.updatedLabel);
+    const cached = adminStatsPanelCache.get(normalizeAdminWorkerScope(workerScope));
+    if (!cached) return false;
+    setStats(cached.data);
+    setLastUpdated(cached.updatedLabel);
     setHasLoadedOnce(true);
     return true;
-  }, []);
+  }, [workerScope]);
 
   const load = useCallback(async (options?: { refresh?: boolean; silent?: boolean; background?: boolean }) => {
     const refresh = !!options?.refresh;
@@ -1459,9 +1601,10 @@ function StatsPanel({
     if (!shouldWarm) return;
 
     const hydrated = hydrateStatsCache();
+    const cached = adminStatsPanelCache.get(normalizeAdminWorkerScope(workerScope));
     const shouldRefresh =
-      !adminStatsPanelCache ||
-      Date.now() - adminStatsPanelCache.fetchedAt > ADMIN_PANEL_STALE_TTL;
+      !cached ||
+      Date.now() - cached.fetchedAt > ADMIN_PANEL_STALE_TTL;
 
     if (!didInitialLoadRef.current) {
       didInitialLoadRef.current = true;
@@ -1482,7 +1625,7 @@ function StatsPanel({
     if (shouldRefresh) {
       void load(statsRef.current || hydrated ? { background: true } : undefined);
     }
-  }, [hydrateStatsCache, isActive, load, shouldWarm]);
+  }, [hydrateStatsCache, isActive, load, shouldWarm, workerScope]);
 
   const addressCount = stats?.address_count ?? 0;
   const inboxCount = stats?.mail_count ?? 0;
@@ -1624,6 +1767,7 @@ function AddressesPanel({
   const {
     state: mailState,
     loadSettings,
+    switchWorkerProfile,
     importByCredential,
     importByPassword,
   } = useMail();
@@ -1640,6 +1784,7 @@ function AddressesPanel({
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newName, setNewName] = useState("");
   const [selectedDomain, setSelectedDomain] = useState("");
+  const [selectedDomainWorkerId, setSelectedDomainWorkerId] = useState("");
   const [customPrefix, setCustomPrefix] = useState("");
   const [useSubdomain, setUseSubdomain] = useState(false);
   const [subdomainPrefix, setSubdomainPrefix] = useState("");
@@ -1706,6 +1851,7 @@ function AddressesPanel({
     [colors.foreground, colors.primary]
   );
   const groupScope = mailState.workerUrl;
+  const addressWorkerScope = mailState.workerUrl || mailState.activeWorkerProfileId;
   const usersById = useMemo(() => {
     const map = new Map<string, AdminUser>();
     for (const user of adminUsers) {
@@ -1844,23 +1990,54 @@ function AddressesPanel({
     setGroupMemberships(next.memberships);
   }, [groupScope]);
 
-  const domains = useMemo(() => mailState.settings?.domains || [], [mailState.settings?.domains]);
-  const domainLabels = useMemo(
-    () => mailState.settings?.domainLabels || [],
-    [mailState.settings?.domainLabels]
-  );
-  const randomSubdomainDomains = useMemo(
-    () => mailState.settings?.randomSubdomainDomains || [],
-    [mailState.settings?.randomSubdomainDomains]
-  );
-  const domainItems = useMemo(
+  const activeWorkerProfile = useMemo(
     () =>
-      domains.map((d, i) => ({
-        value: d,
-        label: domainLabels[i] && domainLabels[i] !== d ? `${domainLabels[i]}（${d}）` : d,
-        supportsRandom: randomSubdomainDomains.includes(d),
-      })),
-    [domains, domainLabels, randomSubdomainDomains]
+      mailState.workerProfiles.find(
+        (profile) => profile.id === mailState.activeWorkerProfileId
+      ) || mailState.workerProfiles[0],
+    [mailState.activeWorkerProfileId, mailState.workerProfiles]
+  );
+  const profileDomainEntries = useMemo(() => {
+    const profiles = mailState.workerProfiles.map((profile) => {
+      if (
+        profile.id === activeWorkerProfile?.id &&
+        (!profile.domains || profile.domains.length === 0) &&
+        (mailState.settings?.domains?.length || 0) > 0
+      ) {
+        return {
+          ...profile,
+          domains: mailState.settings?.domains || [],
+          domainLabels: mailState.settings?.domainLabels || [],
+          randomSubdomainDomains: mailState.settings?.randomSubdomainDomains || [],
+        };
+      }
+      return profile;
+    });
+    return buildWorkerDomainEntries(profiles);
+  }, [activeWorkerProfile?.id, mailState.settings, mailState.workerProfiles]);
+  const activeFallbackDomainEntries = useMemo<WorkerDomainEntry[]>(() => {
+    if (profileDomainEntries.length > 0 || !activeWorkerProfile) return [];
+    const domains = mailState.settings?.domains || [];
+    const labels = mailState.settings?.domainLabels || [];
+    const randomDomains = mailState.settings?.randomSubdomainDomains || [];
+    return domains.map((domain, index) => ({
+      domain,
+      label: labels[index] && labels[index] !== domain ? `${labels[index]}（${domain}）` : domain,
+      workerProfileId: activeWorkerProfile.id,
+      workerName: activeWorkerProfile.name,
+      supportsRandom: randomDomains.includes(domain),
+      conflict: false,
+    }));
+  }, [activeWorkerProfile, mailState.settings, profileDomainEntries.length]);
+  const domainItems = profileDomainEntries.length > 0 ? profileDomainEntries : activeFallbackDomainEntries;
+  const selectedDomainItem = useMemo(
+    () =>
+      domainItems.find(
+        (item) =>
+          item.domain === selectedDomain &&
+          item.workerProfileId === selectedDomainWorkerId
+      ) || null,
+    [domainItems, selectedDomain, selectedDomainWorkerId]
   );
   const groupCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -1889,14 +2066,24 @@ function AddressesPanel({
   }, [addressGroups, groupFilter]);
 
   useEffect(() => {
-    if (domains.length === 0) {
+    if (domainItems.length === 0) {
       setSelectedDomain("");
+      setSelectedDomainWorkerId("");
       return;
     }
-    if (!selectedDomain || !domains.includes(selectedDomain)) {
-      setSelectedDomain(domains[0]);
+    const hasSelected = domainItems.some(
+      (item) =>
+        item.domain === selectedDomain &&
+        item.workerProfileId === selectedDomainWorkerId
+    );
+    if (!hasSelected) {
+      const preferred =
+        domainItems.find((item) => item.workerProfileId === activeWorkerProfile?.id) ||
+        domainItems[0];
+      setSelectedDomain(preferred.domain);
+      setSelectedDomainWorkerId(preferred.workerProfileId);
     }
-  }, [domains, selectedDomain]);
+  }, [activeWorkerProfile?.id, domainItems, selectedDomain, selectedDomainWorkerId]);
 
   const commitPanelState = useCallback(
     (
@@ -1910,7 +2097,7 @@ function AddressesPanel({
       dataRef.current = nextData;
       countRef.current = nextCount;
       offsetRef.current = nextOffset;
-      adminAddressesPanelCache.set(buildAdminAddressesCacheKey(q, userId), {
+      adminAddressesPanelCache.set(buildAdminAddressesCacheKey(q, userId, addressWorkerScope), {
         count: nextCount,
         data: nextData,
         offset: nextOffset,
@@ -1928,12 +2115,12 @@ function AddressesPanel({
         applyState();
       }
     },
-    []
+    [addressWorkerScope]
   );
 
   const hydrateCachedPanel = useCallback(
     (q: string = query, userId: "all" | string = selectedUserId) => {
-      const cached = adminAddressesPanelCache.get(buildAdminAddressesCacheKey(q, userId));
+      const cached = adminAddressesPanelCache.get(buildAdminAddressesCacheKey(q, userId, addressWorkerScope));
       if (!cached) return false;
       dataRef.current = cached.data;
       countRef.current = cached.count;
@@ -1944,7 +2131,7 @@ function AddressesPanel({
       setHasLoadedOnce(true);
       return true;
     },
-    [query, selectedUserId]
+    [addressWorkerScope, query, selectedUserId]
   );
 
   const load = useCallback(
@@ -2172,7 +2359,7 @@ function AddressesPanel({
 
     const hydrated = hydrateCachedPanel(query, selectedUserId);
     const cached = adminAddressesPanelCache.get(
-      buildAdminAddressesCacheKey(query, selectedUserId)
+      buildAdminAddressesCacheKey(query, selectedUserId, addressWorkerScope)
     );
     const shouldRefresh =
       !cached || Date.now() - cached.fetchedAt > ADMIN_PANEL_STALE_TTL;
@@ -2218,6 +2405,7 @@ function AddressesPanel({
     loadAddressIndex,
     loadAdminUserList,
     needsCompleteAddressIndex,
+    addressWorkerScope,
     query,
     selectedUserId,
     shouldWarm,
@@ -2402,10 +2590,10 @@ function AddressesPanel({
   }, [customPrefix, newName, selectedDomain, subdomainPrefix, useSubdomain]);
 
   const currentDomainSupportsRandom =
-    !!selectedDomain && randomSubdomainDomains.includes(selectedDomain);
+    !!selectedDomainItem?.supportsRandom;
 
   const handleCreate = useCallback(async () => {
-    if (!newName.trim() || !selectedDomain) return;
+    if (!newName.trim() || !selectedDomain || !selectedDomainItem) return;
 
     setIsCreating(true);
     try {
@@ -2420,6 +2608,7 @@ function AddressesPanel({
         domain,
         enablePrefix: false,
         enableRandomSubdomain: useRandomSubdomain && currentDomainSupportsRandom,
+        workerProfileId: selectedDomainItem.workerProfileId,
       });
       setShowCreateModal(false);
       setNewName("");
@@ -2433,9 +2622,15 @@ function AddressesPanel({
         password: result.password,
       });
       clearAdminAddressesPanelCache();
-      onMiniToast("已创建邮箱");
-      await load(0, query, { refresh: true });
-      void loadAddressIndex({ force: true, quiet: true });
+      if (selectedDomainItem.workerProfileId !== mailState.activeWorkerProfileId) {
+        clearAllAdminPanelCaches();
+        await switchWorkerProfile(selectedDomainItem.workerProfileId);
+        onMiniToast(`已通过 ${selectedDomainItem.workerName} 创建邮箱`);
+      } else {
+        onMiniToast("已创建邮箱");
+        await load(0, query, { refresh: true });
+        void loadAddressIndex({ force: true, quiet: true });
+      }
     } catch (err: any) {
       Alert.alert("创建失败", err.message || "");
     } finally {
@@ -2450,7 +2645,10 @@ function AddressesPanel({
     onMiniToast,
     query,
     selectedDomain,
+    selectedDomainItem,
     subdomainPrefix,
+    switchWorkerProfile,
+    mailState.activeWorkerProfileId,
     useRandomSubdomain,
     useSubdomain,
   ]);
@@ -3543,7 +3741,7 @@ function AddressesPanel({
               contentContainerStyle={styles.sheetBodyContent}
               keyboardShouldPersistTaps="handled"
             >
-              {domains.length === 0 ? (
+              {domainItems.length === 0 ? (
                 <View
                   style={[
                     styles.inlineNoticeCard,
@@ -3586,8 +3784,12 @@ function AddressesPanel({
                       { backgroundColor: colors.surface, borderColor: colors.border },
                     ]}
                   >
-                    <Text style={[styles.domainText, { color: colors.foreground }]}>
+                    <Text
+                      style={[styles.domainText, { color: colors.foreground }]}
+                      numberOfLines={1}
+                    >
                       @{selectedDomain || "选择域名"}
+                      {selectedDomainItem ? ` · ${selectedDomainItem.workerName}` : ""}
                     </Text>
                     <IconSymbol name="chevron.right" size={18} color={colors.muted} />
                   </Pressable>
@@ -3602,16 +3804,18 @@ function AddressesPanel({
                       <ScrollView style={styles.domainScroll} nestedScrollEnabled>
                         {domainItems.map((item) => (
                           <Pressable
-                            key={item.value}
+                            key={`${item.workerProfileId}:${item.domain}`}
                             onPress={() => {
-                              setSelectedDomain(item.value);
+                              setSelectedDomain(item.domain);
+                              setSelectedDomainWorkerId(item.workerProfileId);
                               setShowDomainPicker(false);
                             }}
                             style={({ pressed }) => [
                               styles.domainOption,
                               {
                                 backgroundColor:
-                                  item.value === selectedDomain
+                                  item.domain === selectedDomain &&
+                                  item.workerProfileId === selectedDomainWorkerId
                                     ? `${colors.primary}15`
                                     : "transparent",
                                 opacity: pressed ? 0.7 : 1,
@@ -3623,13 +3827,20 @@ function AddressesPanel({
                                 styles.domainOptionText,
                                 {
                                   color:
-                                    item.value === selectedDomain
+                                    item.domain === selectedDomain &&
+                                    item.workerProfileId === selectedDomainWorkerId
                                       ? colors.primary
                                       : colors.foreground,
                                 },
                               ]}
                             >
                               @{item.label}
+                            </Text>
+                            <Text
+                              style={[styles.domainWorkerText, { color: colors.muted }]}
+                              numberOfLines={1}
+                            >
+                              {item.workerName}{item.conflict ? " · 域名冲突，请确认账号" : ""}
                             </Text>
                             {item.supportsRandom ? (
                               <View style={[styles.badge, { backgroundColor: `${colors.success}20` }]}>
@@ -3751,7 +3962,9 @@ function AddressesPanel({
                       styles.createButton,
                       {
                         backgroundColor:
-                          isCreating || !newName.trim() ? colors.muted : colors.primary,
+                          isCreating || !newName.trim() || !selectedDomainItem
+                            ? colors.muted
+                            : colors.primary,
                         opacity: pressed ? 0.8 : 1,
                       },
                     ]}
@@ -4039,7 +4252,7 @@ function MailsPanel({
   shouldWarm: boolean;
 }) {
   const router = useRouter();
-  const { state: mailState } = useMail();
+  const { state: mailState, switchWorkerProfile } = useMail();
   const [data, setData] = useState<ParsedMail[]>([]);
   const [count, setCount] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -4078,8 +4291,35 @@ function MailsPanel({
   const mailboxViewTriggerRef = useRef<React.ElementRef<typeof View>>(null);
   const groupScope = mailState.workerUrl;
   const readStateScope = mailState.workerUrl;
+  const mailWorkerScope = mailState.workerUrl || mailState.activeWorkerProfileId;
+  const activeWorkerProfile = useMemo(
+    () =>
+      mailState.workerProfiles.find(
+        (profile) => profile.id === mailState.activeWorkerProfileId
+      ) || mailState.workerProfiles[0],
+    [mailState.activeWorkerProfileId, mailState.workerProfiles]
+  );
+  const mailDomainEntries = useMemo(() => {
+    const profiles = mailState.workerProfiles.map((profile) => {
+      if (
+        profile.id === activeWorkerProfile?.id &&
+        (!profile.domains || profile.domains.length === 0) &&
+        (mailState.settings?.domains?.length || 0) > 0
+      ) {
+        return {
+          ...profile,
+          domains: mailState.settings?.domains || [],
+          domainLabels: mailState.settings?.domainLabels || [],
+          randomSubdomainDomains: mailState.settings?.randomSubdomainDomains || [],
+        };
+      }
+      return profile;
+    });
+    return buildWorkerDomainEntries(profiles);
+  }, [activeWorkerProfile?.id, mailState.settings, mailState.workerProfiles]);
   const isSpamView = kind === "inbox" && inboxMailboxView === "spam";
   const panelCacheKind: AdminMailCacheKind = isSpamView ? "spam" : kind;
+  const panelSearchCacheKey = buildAdminMailSearchCacheKey(panelCacheKind, mailWorkerScope);
   const supportsMailGroupFilter = kind === "inbox" && !isSpamView;
   const supportsSpamToggle = kind === "inbox";
   const shouldLoadMailGroups = supportsMailGroupFilter;
@@ -4241,7 +4481,7 @@ function MailsPanel({
       countRef.current = nextCount;
       offsetRef.current = nextOffset;
       queryRef.current = queryToken;
-      adminMailPanelCache.set(buildAdminMailCacheKey(panelCacheKind, queryToken), {
+      adminMailPanelCache.set(buildAdminMailCacheKey(panelCacheKind, queryToken, mailWorkerScope), {
         count: nextCount,
         data: nextData,
         offset: nextOffset,
@@ -4259,26 +4499,27 @@ function MailsPanel({
         applyState();
       }
     },
-    [panelCacheKind]
+    [mailWorkerScope, panelCacheKind]
   );
 
   const clearKindCaches = useCallback(() => {
     clearAdminMailCacheKinds(
-      panelCacheKind === "spam" ? ["spam", "inbox", "unknown"] : [panelCacheKind]
+      panelCacheKind === "spam" ? ["spam", "inbox", "unknown"] : [panelCacheKind],
+      mailWorkerScope
     );
-  }, [panelCacheKind]);
+  }, [mailWorkerScope, panelCacheKind]);
 
   const hydrateCachedPanel = useCallback(
     (addr: string = address) => {
       const queryToken = normalizeAdminMailQuery(addr);
       const cached = adminMailPanelCache.get(
-        buildAdminMailCacheKey(panelCacheKind, queryToken)
+        buildAdminMailCacheKey(panelCacheKind, queryToken, mailWorkerScope)
       );
       if (!cached) return false;
       commitPanelState(cached.data, cached.count, cached.offset, queryToken);
       return true;
     },
-    [address, commitPanelState, panelCacheKind]
+    [address, commitPanelState, mailWorkerScope, panelCacheKind]
   );
 
   const load = useCallback(
@@ -4298,7 +4539,7 @@ function MailsPanel({
       }
       try {
         if (isSpamView) {
-          const spamDataset = await fetchAdminSpamMailboxDataset(blockedSenders);
+          const spamDataset = await fetchAdminSpamMailboxDataset(blockedSenders, mailWorkerScope);
           if (requestId !== requestIdRef.current) return;
 
           if (readStateScope.trim()) {
@@ -4332,7 +4573,7 @@ function MailsPanel({
                 limit: PAGE_SIZE,
                 offset: freshOffset,
               });
-        const parsed = await parseAdminMailRowsCached(kind, page.results);
+        const parsed = await parseAdminMailRowsCached(kind, page.results, mailWorkerScope);
         if (requestId !== requestIdRef.current) return;
         const isSameQuery = queryToken === queryRef.current;
         const nextData =
@@ -4381,6 +4622,7 @@ function MailsPanel({
       commitPanelState,
       isSpamView,
       kind,
+      mailWorkerScope,
       readStateScope,
       readStateViewKey,
     ]
@@ -4397,7 +4639,7 @@ function MailsPanel({
         setIsLoading(true);
       }
       try {
-        const cached = adminMailSearchDatasetCache.get(panelCacheKind);
+        const cached = adminMailSearchDatasetCache.get(panelSearchCacheKey);
         if (
           !refresh &&
           cached &&
@@ -4410,7 +4652,7 @@ function MailsPanel({
         }
 
         if (isSpamView) {
-          const spamDataset = await fetchAdminSpamMailboxDataset(blockedSenders);
+          const spamDataset = await fetchAdminSpamMailboxDataset(blockedSenders, mailWorkerScope);
           if (requestId !== requestIdRef.current) return;
 
           if (readStateScope.trim()) {
@@ -4424,7 +4666,7 @@ function MailsPanel({
             setUnreadMailKeys(nextUnreadKeys);
           }
 
-          adminMailSearchDatasetCache.set(panelCacheKind, {
+          adminMailSearchDatasetCache.set(panelSearchCacheKey, {
             count: spamDataset.count,
             data: spamDataset.data,
             fetchedAt: Date.now(),
@@ -4453,7 +4695,7 @@ function MailsPanel({
                     offset: nextOffset,
                   });
 
-          const parsed = await parseAdminMailRowsCached(kind, page.results);
+          const parsed = await parseAdminMailRowsCached(kind, page.results, mailWorkerScope);
           if (requestId !== requestIdRef.current) return;
 
           for (const mail of parsed) {
@@ -4479,7 +4721,7 @@ function MailsPanel({
           setUnreadMailKeys(nextUnreadKeys);
         }
 
-        adminMailSearchDatasetCache.set(panelCacheKind, {
+        adminMailSearchDatasetCache.set(panelSearchCacheKey, {
           count: totalCount,
           data: mergedData,
           fetchedAt: Date.now(),
@@ -4505,7 +4747,8 @@ function MailsPanel({
       commitPanelState,
       isSpamView,
       kind,
-      panelCacheKind,
+      mailWorkerScope,
+      panelSearchCacheKey,
       readStateScope,
       readStateViewKey,
     ]
@@ -4517,7 +4760,7 @@ function MailsPanel({
     const trimmed = address.trim();
     const hydrated = !trimmed ? hydrateCachedPanel() : false;
     const panelCache = !trimmed
-      ? adminMailPanelCache.get(buildAdminMailCacheKey(panelCacheKind, ""))
+      ? adminMailPanelCache.get(buildAdminMailCacheKey(panelCacheKind, "", mailWorkerScope))
       : undefined;
     const shouldRefresh =
       trimmed ||
@@ -4566,6 +4809,7 @@ function MailsPanel({
     kind,
     load,
     loadSearchDataset,
+    mailWorkerScope,
     panelCacheKind,
     shouldWarm,
   ]);
@@ -4592,14 +4836,14 @@ function MailsPanel({
     const trimmed = address.trim();
     const timer = setTimeout(() => {
       if (trimmed) {
-        const cached = adminMailSearchDatasetCache.get(panelCacheKind);
+        const cached = adminMailSearchDatasetCache.get(panelSearchCacheKey);
         if (!cached || Date.now() - cached.fetchedAt > SEARCH_DATASET_TTL) {
           void loadSearchDataset(false, dataRef.current.length > 0 ? { background: true } : undefined);
         }
       }
     }, LIVE_SEARCH_DEBOUNCE);
     return () => clearTimeout(timer);
-  }, [address, isActive, loadSearchDataset, panelCacheKind]);
+  }, [address, isActive, loadSearchDataset, panelSearchCacheKey]);
 
   const closeMailFilterMenu = useCallback(() => {
     setShowMailGroupFilterMenu(false);
@@ -4821,7 +5065,7 @@ function MailsPanel({
             try {
               await blockAdminMailSender(readStateScope, mail);
               markMailReadLocally(mail);
-              clearAdminMailCacheKinds(["inbox", "unknown", "spam"]);
+              clearAdminMailCacheKinds(["inbox", "unknown", "spam"], mailWorkerScope);
               onMiniToast("已加入垃圾信箱");
             } catch (err: any) {
               Alert.alert("操作失败", err?.message || "拒收失败");
@@ -4830,7 +5074,7 @@ function MailsPanel({
         },
       ]);
     },
-    [markMailReadLocally, onMiniToast, readStateScope]
+    [mailWorkerScope, markMailReadLocally, onMiniToast, readStateScope]
   );
 
   const handleUnblockSender = useCallback(
@@ -4839,13 +5083,13 @@ function MailsPanel({
       if (!sender || !readStateScope.trim()) return;
       try {
         await unblockAdminMailSender(readStateScope, sender);
-        clearAdminMailCacheKinds(["inbox", "unknown", "spam"]);
+        clearAdminMailCacheKinds(["inbox", "unknown", "spam"], mailWorkerScope);
         onMiniToast("已取消拒收");
       } catch (err: any) {
         Alert.alert("操作失败", err?.message || "取消拒收失败");
       }
     },
-    [onMiniToast, readStateScope]
+    [mailWorkerScope, onMiniToast, readStateScope]
   );
 
   const handleSwitchInboxMailboxView = useCallback(
@@ -4955,16 +5199,46 @@ function MailsPanel({
     );
   }, []);
 
+  const resolveWorkerProfileIdForDomain = useCallback(
+    (domain: string) => {
+      const normalizedDomain = domain.trim().toLowerCase();
+      const matches = mailDomainEntries.filter(
+        (item) => item.domain.toLowerCase() === normalizedDomain
+      );
+      if (matches.length === 1) return matches[0].workerProfileId;
+      const activeMatch = matches.find(
+        (item) => item.workerProfileId === mailState.activeWorkerProfileId
+      );
+      if (activeMatch) return activeMatch.workerProfileId;
+      if (matches.length > 1) return "";
+      if (
+        activeWorkerProfile &&
+        (mailState.settings?.domains || []).some(
+          (item) => item.toLowerCase() === normalizedDomain
+        )
+      ) {
+        return activeWorkerProfile.id;
+      }
+      return mailState.activeWorkerProfileId;
+    },
+    [
+      activeWorkerProfile,
+      mailDomainEntries,
+      mailState.activeWorkerProfileId,
+      mailState.settings?.domains,
+    ]
+  );
+
   const refreshAfterUnknownCreate = useCallback(async () => {
     clearAdminAddressesPanelCache();
-    adminStatsPanelCache = null;
+    adminStatsPanelCache.delete(normalizeAdminWorkerScope(mailWorkerScope));
     clearKindCaches();
     if (address.trim()) {
       await loadSearchDataset(true, dataRef.current.length > 0 ? { background: true } : undefined);
     } else {
       await load(0, "", dataRef.current.length > 0 ? { background: true } : undefined);
     }
-  }, [address, clearKindCaches, load, loadSearchDataset]);
+  }, [address, clearKindCaches, load, loadSearchDataset, mailWorkerScope]);
 
   const handleCreateAddressFromUnknown = useCallback(
     async (mail: ParsedMail) => {
@@ -4977,16 +5251,27 @@ function MailsPanel({
 
       setCreatingAddress(targetAddress);
       try {
+        const workerProfileId = resolveWorkerProfileIdForDomain(parsed.domain);
+        if (!workerProfileId) {
+          Alert.alert("无法创建", "这个域名同时存在于多个 Worker，请切到对应账号后再创建。");
+          return;
+        }
         await createAddress({
           name: parsed.name,
           domain: parsed.domain,
           enablePrefix: false,
           enableRandomSubdomain: false,
+          workerProfileId,
         });
         clearAdminAddressesPanelCache();
         markUnknownAddressCreated(targetAddress);
         onMiniToast(`已创建 ${targetAddress}`);
-        await refreshAfterUnknownCreate();
+        if (workerProfileId !== mailState.activeWorkerProfileId) {
+          clearAllAdminPanelCaches();
+          await switchWorkerProfile(workerProfileId);
+        } else {
+          await refreshAfterUnknownCreate();
+        }
       } catch (err: any) {
         if (isAddressAlreadyExistsError(err)) {
           clearAdminAddressesPanelCache();
@@ -5000,7 +5285,15 @@ function MailsPanel({
         setCreatingAddress(null);
       }
     },
-    [kind, markUnknownAddressCreated, onMiniToast, refreshAfterUnknownCreate]
+    [
+      kind,
+      mailState.activeWorkerProfileId,
+      markUnknownAddressCreated,
+      onMiniToast,
+      refreshAfterUnknownCreate,
+      resolveWorkerProfileIdForDomain,
+      switchWorkerProfile,
+    ]
   );
 
   const renderMailItem = useCallback(
@@ -6712,7 +7005,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: 0.5,
   },
-  headerLeft: { flex: 1, marginHorizontal: 8 },
+  headerLeft: { flex: 1, marginHorizontal: 8, minWidth: 0 },
   headerActions: {
     flexDirection: "row",
     alignItems: "center",
@@ -6720,6 +7013,23 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 19, fontWeight: "700", letterSpacing: -0.2 },
   headerSubtitle: { fontSize: 12, marginTop: 2 },
+  headerWorkerButton: {
+    alignSelf: "flex-start",
+    maxWidth: 180,
+    marginTop: 4,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  headerWorkerText: {
+    flexShrink: 1,
+    fontSize: 11,
+    fontWeight: "800",
+  },
   headerThemeButton: {
     flexDirection: "row",
     alignItems: "center",
@@ -7589,6 +7899,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   domainText: {
+    flex: 1,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -7609,6 +7920,11 @@ const styles = StyleSheet.create({
   },
   domainOptionText: {
     fontSize: 14,
+    fontWeight: "600",
+  },
+  domainWorkerText: {
+    marginTop: 3,
+    fontSize: 11,
     fontWeight: "600",
   },
   badge: {
