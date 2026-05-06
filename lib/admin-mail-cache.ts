@@ -2,16 +2,15 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import type { ParsedAttachment, ParsedMail } from "./api";
 
-const CACHE_PREFIX = "cloudmail_mail_cache_v2";
+/**
+ * 持久化缓存：保存 admin 模式下的 inbox/sendbox/unknown/spam 列表
+ * 软件被杀掉后再次打开时，先从这里读出来立即显示，再走增量刷新。
+ */
+
+const CACHE_PREFIX = "cloudmail_admin_mail_cache_v1";
 const MAX_CACHED_MAILS = 120;
 
-type MailCacheBox = "inbox" | "sent";
-
-type MailCacheKeyInput = {
-  workerUrl?: string;
-  address?: string;
-  box: MailCacheBox;
-};
+export type AdminMailCacheKind = "inbox" | "sendbox" | "unknown" | "spam";
 
 type SummaryAttachment = Pick<ParsedAttachment, "filename" | "mimeType" | "size">;
 
@@ -22,8 +21,6 @@ type SummaryMail = {
   to?: { name?: string; address?: string }[];
   subject?: string;
   preview?: string;
-  text?: string;
-  html?: string;
   date?: string;
   attachments?: SummaryAttachment[];
   raw: string;
@@ -34,32 +31,19 @@ type SummaryMail = {
   metadata?: string;
 };
 
-type MailCachePayload = {
+type AdminMailCachePayload = {
   updatedAt: string;
+  count: number;
+  offset: number;
   mails: SummaryMail[];
 };
 
 function normalizeToken(value?: string) {
-  return encodeURIComponent((value || "").trim().toLowerCase());
+  return encodeURIComponent((value || "default").trim().toLowerCase());
 }
 
-function buildCacheKey(input: MailCacheKeyInput) {
-  return [
-    CACHE_PREFIX,
-    input.box,
-    normalizeToken(input.workerUrl),
-    normalizeToken(input.address),
-  ].join(":");
-}
-
-function buildCandidateCacheKeys(input: MailCacheKeyInput) {
-  const primaryKey = buildCacheKey(input);
-  const keys = [primaryKey];
-  if ((input.workerUrl || "").trim()) {
-    const legacyWorkerKey = buildCacheKey({ ...input, workerUrl: "" });
-    if (legacyWorkerKey !== primaryKey) keys.push(legacyWorkerKey);
-  }
-  return keys;
+function buildCacheKey(kind: AdminMailCacheKind, workerScope?: string) {
+  return [CACHE_PREFIX, kind, normalizeToken(workerScope)].join(":");
 }
 
 const PREVIEW_MAX_LEN = 200;
@@ -80,15 +64,13 @@ function toSummaryMail(mail: ParsedMail): SummaryMail {
     to: mail.to,
     subject: mail.subject,
     preview: truncatePreview(mail.text) || truncatePreview(mail.html),
-    text: mail.text,
-    html: mail.html,
     date: mail.date,
     attachments: mail.attachments?.map(({ filename, mimeType, size }) => ({
       filename,
       mimeType,
       size,
     })),
-    raw: mail.raw || "",
+    raw: "",
     createdAt: mail.createdAt,
     sourcePrefix: mail.sourcePrefix,
     ownerAddress: mail.ownerAddress,
@@ -101,48 +83,59 @@ function toSummaryMails(mails: ParsedMail[]) {
   return mails.slice(0, MAX_CACHED_MAILS).map(toSummaryMail);
 }
 
-export async function readMailboxCache(
-  keyInput: MailCacheKeyInput
-): Promise<ParsedMail[]> {
+export interface AdminMailCacheEntry {
+  count: number;
+  offset: number;
+  mails: ParsedMail[];
+}
+
+export async function readAdminMailCache(
+  kind: AdminMailCacheKind,
+  workerScope?: string
+): Promise<AdminMailCacheEntry | null> {
   try {
-    const [primaryKey, ...fallbackKeys] = buildCandidateCacheKeys(keyInput);
-    let raw = await AsyncStorage.getItem(primaryKey);
-    if (!raw) {
-      for (const fallbackKey of fallbackKeys) {
-        raw = await AsyncStorage.getItem(fallbackKey);
-        if (raw) {
-          await AsyncStorage.setItem(primaryKey, raw).catch(() => undefined);
-          break;
-        }
-      }
-    }
-    if (!raw) return [];
+    const raw = await AsyncStorage.getItem(buildCacheKey(kind, workerScope));
+    if (!raw) return null;
 
-    const parsed = JSON.parse(raw) as MailCachePayload;
-    if (!Array.isArray(parsed?.mails)) return [];
+    const parsed = JSON.parse(raw) as AdminMailCachePayload;
+    if (!Array.isArray(parsed?.mails)) return null;
 
-    return parsed.mails
+    const mails = parsed.mails
       .filter((item) => item && typeof item.id === "number")
       .map((item) => ({
         ...item,
-        text: item.text || item.preview || undefined,
-        html: item.html || undefined,
         raw: item.raw || "",
         createdAt: item.createdAt || item.date || new Date().toISOString(),
-      }));
+      })) as ParsedMail[];
+
+    return {
+      count: typeof parsed.count === "number" ? parsed.count : mails.length,
+      offset: typeof parsed.offset === "number" ? parsed.offset : mails.length,
+      mails,
+    };
   } catch {
-    return [];
+    return null;
   }
 }
 
-export async function writeMailboxCache(
-  keyInput: MailCacheKeyInput,
-  mails: ParsedMail[]
+export async function writeAdminMailCache(
+  kind: AdminMailCacheKind,
+  workerScope: string | undefined,
+  entry: AdminMailCacheEntry
 ) {
-  const payload: MailCachePayload = {
+  const payload: AdminMailCachePayload = {
     updatedAt: new Date().toISOString(),
-    mails: toSummaryMails(mails),
+    count: entry.count,
+    offset: entry.offset,
+    mails: toSummaryMails(entry.mails),
   };
 
-  await AsyncStorage.setItem(buildCacheKey(keyInput), JSON.stringify(payload));
+  await AsyncStorage.setItem(buildCacheKey(kind, workerScope), JSON.stringify(payload));
+}
+
+export async function clearAdminMailCache(
+  kind: AdminMailCacheKind,
+  workerScope?: string
+) {
+  await AsyncStorage.removeItem(buildCacheKey(kind, workerScope));
 }

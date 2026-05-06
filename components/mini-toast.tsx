@@ -14,17 +14,19 @@ import { useColors } from "@/hooks/use-colors";
 interface MiniToastProps {
   message: string | null;
   onDismiss?: () => void;
+  position?: "top" | "bottom";
 }
 
-export function MiniToast({ message, onDismiss }: MiniToastProps) {
+export function MiniToast({ message, onDismiss, position = "bottom" }: MiniToastProps) {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const translateY = useSharedValue(24);
+  const hiddenOffset = position === "top" ? -24 : 24;
+  const translateY = useSharedValue(hiddenOffset);
   const opacity = useSharedValue(0);
 
   useEffect(() => {
     if (!message) {
-      translateY.value = 24;
+      translateY.value = hiddenOffset;
       opacity.value = 0;
       return;
     }
@@ -34,12 +36,12 @@ export function MiniToast({ message, onDismiss }: MiniToastProps) {
 
     translateY.value = withDelay(
       1400,
-      withTiming(24, { duration: 180 }, () => {
+      withTiming(hiddenOffset, { duration: 180 }, () => {
         if (onDismiss) runOnJS(onDismiss)();
       })
     );
     opacity.value = withDelay(1400, withTiming(0, { duration: 180 }));
-  }, [message, onDismiss, opacity, translateY]);
+  }, [hiddenOffset, message, onDismiss, opacity, translateY]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,
@@ -55,7 +57,9 @@ export function MiniToast({ message, onDismiss }: MiniToastProps) {
         styles.container,
         animatedStyle,
         {
-          bottom: insets.bottom + 18,
+          ...(position === "top"
+            ? { top: insets.top + 14 }
+            : { bottom: insets.bottom + 18 }),
           backgroundColor: colors.foreground,
         },
       ]}

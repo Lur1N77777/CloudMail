@@ -1,5 +1,12 @@
 # Don't upload these to EAS build servers
-frontend/
+node_modules
+.git
+.android-sdk
+.jdk17
+.codex-build-logs
+.expo
+.playwright-mcp
+frontend
 scripts/extract_endpoints.mjs
 scripts/inspect_bundle.mjs
 scripts/find_context.mjs
@@ -8,6 +15,17 @@ BUILD.md
 build-apk.bat
 todo.md
 design.md
-.omx/
-tests/
-lib/__tests__/
+.omx
+tests
+lib/__tests__
+releases
+.trellis
+dist
+docs
+android/app/build
+android/.gradle
+android/build
+android/app/.cxx
+.husky
+.github
+.claude

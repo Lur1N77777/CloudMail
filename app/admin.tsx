@@ -22,6 +22,7 @@ import {
   RefreshControl,
   InteractionManager,
   Keyboard,
+  Linking,
 } from "react-native";
 import type { GestureResponderEvent, StyleProp, TextStyle } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
@@ -119,6 +120,18 @@ import {
   subscribeAdminMailSpamState,
   unblockAdminMailSender,
 } from "@/lib/admin-mail-spam-state";
+import {
+  readAdminMailCache,
+  writeAdminMailCache,
+  clearAdminMailCache as clearAdminMailPersistedCache,
+  type AdminMailCacheKind as AdminMailPersistedCacheKind,
+} from "@/lib/admin-mail-cache";
+import {
+  readAdminAddressIndexCache,
+  readAdminAddressPanelCache,
+  writeAdminAddressIndexCache,
+  writeAdminAddressPanelCache,
+} from "@/lib/admin-address-cache";
 import { buildMailboxName, normalizeMailboxPrefix } from "@/lib/mailbox-name";
 import {
   parseMail,
@@ -131,6 +144,7 @@ import {
   getMailRecipientsDisplay,
 } from "@/lib/mail-parser";
 import { mergeMailLists, sortMailsDesc } from "@/lib/mail-list-utils";
+import { formatShanghaiShortDateTime, formatShanghaiTime } from "@/lib/time";
 
 type AdminTab = "stats" | "addresses" | "mails" | "sendbox" | "unknown" | "send";
 type AdminMailPanelKind = "inbox" | "sendbox" | "unknown";
@@ -161,7 +175,7 @@ const ADMIN_USERS_PAGE_SIZE = 100;
 const LIVE_SEARCH_DEBOUNCE = 120;
 const FULL_SEARCH_PAGE_SIZE = 100;
 const SEARCH_DATASET_TTL = 30_000;
-const ADMIN_PANEL_STALE_TTL = 15_000;
+const ADMIN_PANEL_STALE_TTL = 60_000;
 const ADMIN_TABS: { key: AdminTab; label: string }[] = [
   { key: "stats", label: "统计" },
   { key: "addresses", label: "地址" },
@@ -589,10 +603,44 @@ function clearAllAdminPanelCaches() {
 }
 
 function formatAdminPanelRefreshTime(date = new Date()) {
-  return date.toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatShanghaiTime(date);
+}
+
+function getAddressDisplayTimestamp(item: AdminAddress) {
+  if (item.latest_mail_at) {
+    return { label: "最新邮件", value: item.latest_mail_at };
+  }
+  if (item.created_at) {
+    return { label: "创建于", value: item.created_at };
+  }
+  if (item.updated_at) {
+    return { label: "更新于", value: item.updated_at };
+  }
+  return null;
+}
+
+function getAdminRefreshControlProps(colors: ReturnType<typeof useColors>) {
+  return {
+    tintColor: colors.primary,
+    colors: [colors.primary],
+    progressBackgroundColor: colors.surface,
+  };
+}
+
+function mergeAuthoritativeFirstPage<T extends { id: number }>(
+  existing: T[],
+  firstPage: T[],
+  totalCount?: number
+) {
+  if (existing.length === 0 || firstPage.length === 0) {
+    return firstPage;
+  }
+  const firstPageIds = new Set(firstPage.map((item) => item.id));
+  const tail = existing.slice(firstPage.length).filter((item) => !firstPageIds.has(item.id));
+  const merged = [...firstPage, ...tail];
+  return typeof totalCount === "number" && totalCount >= 0
+    ? merged.slice(0, Math.max(firstPage.length, totalCount))
+    : merged;
 }
 
 async function parseAdminMailRowsCached(
@@ -758,10 +806,10 @@ export default function AdminScreen() {
     useThemeContext();
   const [tab, setTab] = useState<AdminTab>(ADMIN_INITIAL_TAB);
   const [mountedTabs, setMountedTabs] = useState<Record<AdminTab, boolean>>(() =>
-    createMountedTabsAround(ADMIN_INITIAL_TAB_INDEX, ADMIN_TABS.length)
+    createMountedTabsAround(ADMIN_INITIAL_TAB_INDEX, 0)
   );
   const [warmTabs, setWarmTabs] = useState<Record<AdminTab, boolean>>(() =>
-    createMountedTabsAround(ADMIN_INITIAL_TAB_INDEX)
+    createMountedTabsAround(ADMIN_INITIAL_TAB_INDEX, 0)
   );
   const [miniToastMessage, setMiniToastMessage] = useState<string | null>(null);
   const [workerMenu, setWorkerMenu] = useState<{
@@ -861,7 +909,7 @@ export default function AdminScreen() {
 
   const markTabsMountedAround = useCallback((index: number, radius = 1) => {
     setMountedTabs((prev) => includeMountedTabsAround(prev, index, radius));
-    setWarmTabs((prev) => includeMountedTabsAround(prev, index, radius));
+    setWarmTabs((prev) => includeMountedTabsAround(prev, index, 0));
   }, []);
 
   const commitTabByIndex = useCallback(
@@ -919,40 +967,9 @@ export default function AdminScreen() {
   );
 
   useEffect(() => {
-    let cancelled = false;
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    let task: ReturnType<typeof InteractionManager.runAfterInteractions> | null = null;
-    const warmOrder = ADMIN_TABS.map((_, index) => index)
-      .filter((index) => Math.abs(index - ADMIN_INITIAL_TAB_INDEX) > 1)
-      .sort(
-        (a, b) =>
-          Math.abs(a - ADMIN_INITIAL_TAB_INDEX) - Math.abs(b - ADMIN_INITIAL_TAB_INDEX)
-      );
-    let cursor = 0;
-
-    const warmNext = () => {
-      if (cancelled || cursor >= warmOrder.length) return;
-      task = InteractionManager.runAfterInteractions(() => {
-        if (cancelled) return;
-        setWarmTabs((prev) => includeMountedTabsAround(prev, warmOrder[cursor], 0));
-        cursor += 1;
-        timeout = setTimeout(warmNext, 90);
-      });
-    };
-
-    timeout = setTimeout(warmNext, 160);
-
-    return () => {
-      cancelled = true;
-      if (timeout) clearTimeout(timeout);
-      task?.cancel?.();
-    };
-  }, []);
-
-  useEffect(() => {
     activeTabIndexRef.current = activeTabIndex;
     requestedTabIndexRef.current = activeTabIndex;
-    markTabsMountedAround(activeTabIndex);
+    markTabsMountedAround(activeTabIndex, 0);
     preparedPagerIndex.value = activeTabIndex;
     settledIndex.value = activeTabIndex;
     if (Math.abs(visualIndex.value - activeTabIndex) > 0.01) {
@@ -1040,6 +1057,7 @@ export default function AdminScreen() {
         })
         .onBegin(() => {
           dragStartIndex.value = visualIndex.value;
+          runOnJS(markTabsMountedAround)(Math.round(dragStartIndex.value));
         })
         .onUpdate((event) => {
           if (pagerWidthValue.value <= 0) return;
@@ -1511,7 +1529,6 @@ function StatsPanel({
   const [stats, setStats] = useState<AdminStatistics | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
@@ -1557,8 +1574,6 @@ function StatsPanel({
 
     if (refresh) {
       setIsRefreshing(true);
-    } else if (background && !!statsRef.current) {
-      setIsSyncing(true);
     } else if (!silent && !statsRef.current) {
       setIsLoading(true);
     }
@@ -1589,8 +1604,6 @@ function StatsPanel({
     } finally {
       if (refresh) {
         setIsRefreshing(false);
-      } else if (background) {
-        setIsSyncing(false);
       } else if (!silent) {
         setIsLoading(false);
       }
@@ -1641,8 +1654,7 @@ function StatsPanel({
           onRefresh={() => {
             void load({ refresh: true });
           }}
-          tintColor={colors.primary}
-          colors={[colors.primary]}
+          {...getAdminRefreshControlProps(colors)}
         />
       }
     >
@@ -1653,7 +1665,6 @@ function StatsPanel({
               更新于 {lastUpdated}
             </Text>
           ) : null}
-          {isSyncing ? <InlineSyncBadge colors={colors} /> : null}
         </View>
         <Pressable
           onPress={() => {
@@ -1776,7 +1787,6 @@ function AddressesPanel({
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [count, setCount] = useState(0);
@@ -1840,6 +1850,8 @@ function AddressesPanel({
   const addressLoadingRequestIdRef = useRef(0);
   const addressIndexDataRef = useRef<AdminAddress[]>([]);
   const addressIndexRequestIdRef = useRef(0);
+  const persistedAddressHydrateKeyRef = useRef("");
+  const persistedAddressIndexHydrateScopeRef = useRef("");
   const addressPanelRootRef = useRef<React.ElementRef<typeof View>>(null);
   const userFilterTriggerRef = useRef<React.ElementRef<typeof View>>(null);
   const highlightStyle = useMemo(
@@ -2103,6 +2115,10 @@ function AddressesPanel({
         offset: nextOffset,
         fetchedAt: Date.now(),
       });
+      void writeAdminAddressPanelCache(
+        { workerScope: addressWorkerScope, query: q, userId },
+        { count: nextCount, offset: nextOffset, addresses: nextData }
+      ).catch(() => {});
       const applyState = () => {
         setData(nextData);
         setCount(nextCount);
@@ -2134,6 +2150,75 @@ function AddressesPanel({
     [addressWorkerScope, query, selectedUserId]
   );
 
+  useEffect(() => {
+    if (!addressWorkerScope) return;
+    const cacheKey = buildAdminAddressesCacheKey(query, selectedUserId, addressWorkerScope);
+    if (persistedAddressHydrateKeyRef.current === cacheKey) return;
+    persistedAddressHydrateKeyRef.current = cacheKey;
+
+    let cancelled = false;
+    void (async () => {
+      const cached = await readAdminAddressPanelCache({
+        workerScope: addressWorkerScope,
+        query,
+        userId: selectedUserId,
+      });
+      if (cancelled || !cached || persistedAddressHydrateKeyRef.current !== cacheKey) {
+        return;
+      }
+      if (
+        dataRef.current.length > 0 &&
+        queryRef.current === query &&
+        selectedUserIdRef.current === selectedUserId
+      ) {
+        return;
+      }
+
+      adminAddressesPanelCache.set(cacheKey, {
+        count: cached.count,
+        data: cached.addresses,
+        offset: cached.offset,
+        fetchedAt: 0,
+      });
+      dataRef.current = cached.addresses;
+      countRef.current = cached.count;
+      offsetRef.current = cached.offset;
+      queryRef.current = query;
+      selectedUserIdRef.current = selectedUserId;
+      setData(cached.addresses);
+      setCount(cached.count);
+      setOffset(cached.offset);
+      setHasLoadedOnce(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addressWorkerScope, query, selectedUserId]);
+
+  useEffect(() => {
+    if (!addressWorkerScope) return;
+    if (persistedAddressIndexHydrateScopeRef.current === addressWorkerScope) return;
+    persistedAddressIndexHydrateScopeRef.current = addressWorkerScope;
+
+    let cancelled = false;
+    void (async () => {
+      const cached = await readAdminAddressIndexCache(addressWorkerScope);
+      if (cancelled || !cached || persistedAddressIndexHydrateScopeRef.current !== addressWorkerScope) {
+        return;
+      }
+      addressIndexDataRef.current = cached.addresses;
+      setAddressIndexData(cached.addresses);
+      setAddressIndexLoaded(cached.addresses.length);
+      setAddressIndexCount(cached.count);
+      setAddressIndexStatus("idle");
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addressWorkerScope]);
+
   const load = useCallback(
     async (
       freshOffset: number = 0,
@@ -2151,7 +2236,6 @@ function AddressesPanel({
         setIsRefreshing(true);
       } else if (background && dataRef.current.length > 0) {
         addressSyncingRequestIdRef.current = requestId;
-        setIsSyncing(true);
       } else if (!silent && freshOffset === 0 && dataRef.current.length === 0) {
         addressLoadingRequestIdRef.current = requestId;
         setIsLoading(true);
@@ -2181,7 +2265,10 @@ function AddressesPanel({
         }
         let nextData: AdminAddress[];
         if (freshOffset === 0) {
-          nextData = page.results;
+          nextData =
+            dataRef.current.length > page.results.length
+              ? mergeAuthoritativeFirstPage(dataRef.current, page.results, page.count)
+              : page.results;
         } else {
           const existingIds = new Set(dataRef.current.map((item) => item.id));
           const uniqueNewRows = page.results.filter((item) => !existingIds.has(item.id));
@@ -2221,7 +2308,6 @@ function AddressesPanel({
         }
         if (addressSyncingRequestIdRef.current === requestId) {
           addressSyncingRequestIdRef.current = 0;
-          setIsSyncing(false);
         }
         if (addressLoadingRequestIdRef.current === requestId) {
           addressLoadingRequestIdRef.current = 0;
@@ -2291,6 +2377,12 @@ function AddressesPanel({
         }
 
         if (requestId !== addressIndexRequestIdRef.current) return;
+        const finalSnapshot = Array.from(byId.values());
+        void writeAdminAddressIndexCache(addressWorkerScope, {
+          count: total || finalSnapshot.length,
+          offset: finalSnapshot.length,
+          addresses: finalSnapshot,
+        }).catch(() => {});
         setAddressIndexStatus("ready");
       } catch (err: any) {
         if (requestId !== addressIndexRequestIdRef.current) return;
@@ -2298,7 +2390,16 @@ function AddressesPanel({
         setAddressIndexError(err?.message || "地址索引补全失败");
       }
     },
-    [addressIndexStatus, mailState.isConfigured]
+    [addressIndexStatus, addressWorkerScope, mailState.isConfigured]
+  );
+
+  const requestAddressIndexIfNeeded = useCallback(
+    (options?: { force?: boolean; quiet?: boolean }) => {
+      if (needsCompleteAddressIndex) {
+        void loadAddressIndex(options);
+      }
+    },
+    [loadAddressIndex, needsCompleteAddressIndex]
   );
 
   const loadAdminUserList = useCallback(async () => {
@@ -2367,10 +2468,6 @@ function AddressesPanel({
     if (!hasActivatedRef.current) {
       hasActivatedRef.current = true;
       activationRefreshAtRef.current = Date.now();
-      const warmIndexTask = InteractionManager.runAfterInteractions(() => {
-        void loadAddressIndex({ quiet: true });
-        void loadAdminUserList();
-      });
       if (shouldRefresh) {
         void load(
           0,
@@ -2382,28 +2479,20 @@ function AddressesPanel({
             : { silent: true }
         );
       }
-      return () => warmIndexTask.cancel();
+      return;
     }
 
-    const warmIndexTask = InteractionManager.runAfterInteractions(() => {
-      void loadAddressIndex({ quiet: true });
-      void loadAdminUserList();
-    });
-
     if (!isActive) {
-      return () => warmIndexTask.cancel();
+      return;
     }
 
     if (shouldRefresh && !needsCompleteAddressIndex) {
       void load(0, query, { background: hydrated });
     }
-    return () => warmIndexTask.cancel();
   }, [
     hydrateCachedPanel,
     isActive,
     load,
-    loadAddressIndex,
-    loadAdminUserList,
     needsCompleteAddressIndex,
     addressWorkerScope,
     query,
@@ -2426,7 +2515,7 @@ function AddressesPanel({
       return;
     }
     if (groupFilter !== "all" || queryRef.current.trim()) {
-      void loadAddressIndex();
+      requestAddressIndexIfNeeded();
       return;
     }
     const hydrated = hydrateCachedPanel(queryRef.current, selectedUserId);
@@ -2436,7 +2525,7 @@ function AddressesPanel({
     hydrateCachedPanel,
     isActive,
     load,
-    loadAddressIndex,
+    requestAddressIndexIfNeeded,
     selectedUserId,
   ]);
 
@@ -2446,11 +2535,11 @@ function AddressesPanel({
     if (now - activationRefreshAtRef.current < 1200) return;
     activationRefreshAtRef.current = now;
     if (needsCompleteAddressIndex) {
-      void loadAddressIndex();
+      requestAddressIndexIfNeeded();
       return;
     }
     void load(0, queryRef.current, dataRef.current.length > 0 ? { background: true } : undefined);
-  }, [isActive, load, loadAddressIndex, needsCompleteAddressIndex]);
+  }, [isActive, load, needsCompleteAddressIndex, requestAddressIndexIfNeeded]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -2467,7 +2556,7 @@ function AddressesPanel({
         return;
       }
       if (query.trim() || groupFilter !== "all") {
-        void loadAddressIndex();
+        requestAddressIndexIfNeeded();
         return;
       }
       const hydrated = hydrateCachedPanel(query, selectedUserId);
@@ -2479,8 +2568,8 @@ function AddressesPanel({
     hydrateCachedPanel,
     isActive,
     load,
-    loadAddressIndex,
     query,
+    requestAddressIndexIfNeeded,
     selectedUserId,
   ]);
 
@@ -2490,7 +2579,7 @@ function AddressesPanel({
       return;
     }
     if (query.trim() || groupFilter !== "all") {
-      void loadAddressIndex({ force: addressIndexStatus === "error" });
+      requestAddressIndexIfNeeded({ force: addressIndexStatus === "error" });
       return;
     }
     void load(0, query, { refresh: false, silent: false });
@@ -2504,7 +2593,7 @@ function AddressesPanel({
       return;
     }
     if (groupFilter !== "all") {
-      void loadAddressIndex();
+      requestAddressIndexIfNeeded();
       return;
     }
     const hydrated = hydrateCachedPanel("", selectedUserId);
@@ -2523,10 +2612,17 @@ function AddressesPanel({
           onPress: async () => {
             try {
               await adminDeleteAddress(item.id);
-              clearAdminAddressesPanelCache();
-              setData((prev) => prev.filter((x) => x.id !== item.id));
+              const nextData = dataRef.current.filter((x) => x.id !== item.id);
+              const nextCount = Math.max(0, countRef.current - 1);
+              const nextOffset = Math.min(offsetRef.current, nextData.length);
+              commitPanelState(
+                nextData,
+                nextCount,
+                nextOffset,
+                queryRef.current,
+                selectedUserIdRef.current
+              );
               setAddressIndexData((prev) => prev.filter((x) => x.id !== item.id));
-              setCount((prev) => Math.max(0, prev - 1));
               setAddressIndexCount((prev) => Math.max(0, prev - 1));
               setAddressIndexLoaded((prev) => Math.max(0, prev - 1));
               setSelectedAddressIds((prev) => {
@@ -2536,6 +2632,7 @@ function AddressesPanel({
                 return next;
               });
               onMiniToast("地址已删除");
+              void load(0, queryRef.current, nextData.length > 0 ? { background: true } : undefined);
             } catch (err: any) {
               Alert.alert("删除失败", err.message || "");
             }
@@ -2543,7 +2640,7 @@ function AddressesPanel({
         },
       ]
     );
-  }, [onMiniToast]);
+  }, [commitPanelState, load, onMiniToast]);
 
   const handleClearInbox = useCallback((item: AdminAddress) => {
     Alert.alert("清空收件箱", `清空 ${item.name} 的收件箱？`, [
@@ -2554,28 +2651,81 @@ function AddressesPanel({
         onPress: async () => {
           try {
             await adminClearInbox(item.name);
-            clearAdminAddressesPanelCache();
-            Alert.alert("已清空");
+            const nextData = dataRef.current.map((row) =>
+              row.id === item.id ? { ...row, mail_count: 0 } : row
+            );
+            commitPanelState(
+              nextData,
+              countRef.current,
+              Math.min(offsetRef.current, nextData.length),
+              queryRef.current,
+              selectedUserIdRef.current
+            );
+            setAddressIndexData((prev) =>
+              prev.map((row) => (row.id === item.id ? { ...row, mail_count: 0 } : row))
+            );
+            onMiniToast("收件箱已清空");
+            void load(0, queryRef.current, nextData.length > 0 ? { background: true } : undefined);
           } catch (err: any) {
             Alert.alert("失败", err.message || "");
           }
         },
       },
     ]);
-  }, []);
+  }, [commitPanelState, load, onMiniToast]);
 
   const handleShowCredential = useCallback(async (item: AdminAddress) => {
     try {
       const cred = await adminShowAddressCredential(item.id);
-      setShowCred({
-        address: item.name,
-        jwt: cred.jwt,
-        password: cred.password,
-      });
+      // 快速路径：直接复制 JWT 并 toast 提示，不再弹全屏页面
+      // 一般场景就是要拿来登录或者绑别的设备，不需要再点一道"复制"按钮
+      const value = cred.jwt || cred.password;
+      if (!value) {
+        onMiniToast("没有可用的凭证");
+        return;
+      }
+      const ok = await copyTextToClipboard(value);
+      if (ok) {
+        onMiniToast(cred.jwt ? "JWT 已复制" : "密码已复制");
+      } else {
+        // 剪贴板失败时再退化到详情 Modal，便于用户手动复制
+        setShowCred({
+          address: item.name,
+          jwt: cred.jwt,
+          password: cred.password,
+        });
+      }
     } catch (err: any) {
       Alert.alert("获取凭证失败", err.message || "");
     }
-  }, []);
+  }, [onMiniToast]);
+
+  const handleLoginLink = useCallback(async (item: AdminAddress) => {
+    try {
+      const cred = await adminShowAddressCredential(item.id);
+      if (!cred.jwt) {
+        onMiniToast("没有可用的 JWT 凭证");
+        return;
+      }
+      const activeProfile = mailState.workerProfiles.find(
+        (p) => p.id === mailState.activeWorkerProfileId
+      ) || mailState.workerProfiles[0];
+      const base = (activeProfile?.frontendUrl || "").replace(/\/+$/, "");
+      if (!base) {
+        onMiniToast("未配置前端地址，请到设置中填写");
+        return;
+      }
+      const link = `${base}/?jwt=${cred.jwt}`;
+      const ok = await copyTextToClipboard(link);
+      if (ok) {
+        onMiniToast("登录链接已复制");
+      } else {
+        onMiniToast("复制失败");
+      }
+    } catch (err: any) {
+      onMiniToast(err.message || "获取凭证失败");
+    }
+  }, [mailState.workerProfiles, mailState.activeWorkerProfileId, onMiniToast]);
 
   const handleGroupAddress = useCallback((item: AdminAddress) => {
     setGroupingAddress(item);
@@ -2591,7 +2741,6 @@ function AddressesPanel({
 
   const currentDomainSupportsRandom =
     !!selectedDomainItem?.supportsRandom;
-
   const handleCreate = useCallback(async () => {
     if (!newName.trim() || !selectedDomain || !selectedDomainItem) return;
 
@@ -2619,9 +2768,8 @@ function AddressesPanel({
       setShowCred({
         address: result.address,
         jwt: result.jwt,
-        password: result.password,
+        password: result.password || undefined,
       });
-      clearAdminAddressesPanelCache();
       if (selectedDomainItem.workerProfileId !== mailState.activeWorkerProfileId) {
         clearAllAdminPanelCaches();
         await switchWorkerProfile(selectedDomainItem.workerProfileId);
@@ -2629,7 +2777,7 @@ function AddressesPanel({
       } else {
         onMiniToast("已创建邮箱");
         await load(0, query, { refresh: true });
-        void loadAddressIndex({ force: true, quiet: true });
+        requestAddressIndexIfNeeded({ force: true, quiet: true });
       }
     } catch (err: any) {
       Alert.alert("创建失败", err.message || "");
@@ -2640,10 +2788,10 @@ function AddressesPanel({
     customPrefix,
     currentDomainSupportsRandom,
     load,
-    loadAddressIndex,
     newName,
     onMiniToast,
     query,
+    requestAddressIndexIfNeeded,
     selectedDomain,
     selectedDomainItem,
     subdomainPrefix,
@@ -2672,6 +2820,20 @@ function AddressesPanel({
       onMiniToast(`${label}已复制`);
     } else {
       Alert.alert("复制失败", value);
+    }
+  }, [onMiniToast]);
+
+  const openLoginLink = useCallback(async (link: string) => {
+    const supported = await Linking.canOpenURL(link).catch(() => false);
+    if (supported) {
+      await Linking.openURL(link);
+    } else {
+      const ok = await copyTextToClipboard(link);
+      if (ok) {
+        onMiniToast("链接已复制（无法打开浏览器）");
+      } else {
+        Alert.alert("登录链接", link);
+      }
     }
   }, [onMiniToast]);
 
@@ -2752,10 +2914,9 @@ function AddressesPanel({
       setCredentialInput("");
       setBindEmail("");
       setBindPassword("");
-      clearAdminAddressesPanelCache();
       onMiniToast("已绑定地址");
       await load(0, query, { refresh: true });
-      void loadAddressIndex({ force: true, quiet: true });
+      requestAddressIndexIfNeeded({ force: true, quiet: true });
     } catch (err: any) {
       Alert.alert("绑定失败", err.message || "");
     } finally {
@@ -2769,9 +2930,9 @@ function AddressesPanel({
     importByCredential,
     importByPassword,
     load,
-    loadAddressIndex,
     onMiniToast,
     query,
+    requestAddressIndexIfNeeded,
   ]);
 
   const closeUserFilterMenu = useCallback(() => {
@@ -2819,7 +2980,6 @@ function AddressesPanel({
       addressSyncingRequestIdRef.current = 0;
       addressLoadingRequestIdRef.current = 0;
       setIsRefreshing(false);
-      setIsSyncing(false);
       setIsLoading(false);
       selectedUserIdRef.current = nextUserId;
       setSelectedUserId(nextUserId);
@@ -2985,12 +3145,17 @@ function AddressesPanel({
 
   const applyBulkLocalMutations = useCallback(
     (action: AddressBulkActionKind, addresses: AddressListItemData[]) => {
-      clearAdminAddressesPanelCache();
       if (action === "delete_addresses" || action === "delete_empty") {
         const deletedIds = new Set(addresses.map((item) => item.id));
-        setData((prev) => prev.filter((item) => !deletedIds.has(item.id)));
+        const nextData = dataRef.current.filter((item) => !deletedIds.has(item.id));
+        commitPanelState(
+          nextData,
+          Math.max(0, countRef.current - deletedIds.size),
+          Math.min(offsetRef.current, nextData.length),
+          queryRef.current,
+          selectedUserIdRef.current
+        );
         setAddressIndexData((prev) => prev.filter((item) => !deletedIds.has(item.id)));
-        setCount((prev) => Math.max(0, prev - deletedIds.size));
         setAddressIndexCount((prev) => Math.max(0, prev - deletedIds.size));
         setAddressIndexLoaded((prev) => Math.max(0, prev - deletedIds.size));
         setSelectedAddressIds((prev) => {
@@ -3011,10 +3176,17 @@ function AddressesPanel({
             action === "clear_sent" || action === "clear_all" ? 0 : item.send_count,
         };
       };
-      setData((prev) => prev.map(updateCounts));
+      const nextData = dataRef.current.map(updateCounts);
+      commitPanelState(
+        nextData,
+        countRef.current,
+        Math.min(offsetRef.current, nextData.length),
+        queryRef.current,
+        selectedUserIdRef.current
+      );
       setAddressIndexData((prev) => prev.map(updateCounts));
     },
-    []
+    [commitPanelState]
   );
 
   const executeBulkFallback = useCallback(
@@ -3130,6 +3302,11 @@ function AddressesPanel({
       if (action === "add_group" || action === "remove_group") {
         await loadGroupsState();
       }
+      void load(
+        0,
+        queryRef.current,
+        dataRef.current.length > 0 ? { background: true } : undefined
+      );
       setBulkModal((prev) => ({
         ...prev,
         mode: "done",
@@ -3154,6 +3331,7 @@ function AddressesPanel({
     bulkModal.addresses,
     bulkModal.targetGroup,
     executeBulkFallback,
+    load,
     loadGroupsState,
     onMiniToast,
   ]);
@@ -3212,6 +3390,7 @@ function AddressesPanel({
         onOpen={handleOpenAddress}
         onGroup={handleGroupAddress}
         onShowCredential={handleShowCredential}
+        onLoginLink={handleLoginLink}
         onClearInbox={handleClearInbox}
         onDelete={handleDelete}
         selectionMode={selectionMode}
@@ -3226,6 +3405,7 @@ function AddressesPanel({
       handleClearInbox,
       handleDelete,
       handleGroupAddress,
+      handleLoginLink,
       handleOpenAddress,
       handleShowCredential,
       highlightStyle,
@@ -3239,23 +3419,48 @@ function AddressesPanel({
   return (
     <View ref={addressPanelRootRef} style={{ flex: 1 }}>
       <View style={[styles.addressToolbar, { borderBottomColor: colors.border }]}>
-        <View
-          style={[
-            styles.searchFieldCard,
-            { backgroundColor: colors.surface, borderColor: colors.border },
-          ]}
-        >
-          <IconSymbol name="magnifyingglass" size={16} color={colors.muted} />
+        <View style={styles.mailToolbarTopRow}>
+          <View
+            style={[
+              styles.searchFieldCard,
+              styles.mailSearchCard,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
+          >
+            <IconSymbol name="magnifyingglass" size={16} color={colors.muted} />
             <TextInput
-              style={[styles.searchFieldInput, { color: colors.foreground }]}
+              style={[styles.searchFieldInput, styles.mailSearchFieldInput, { color: colors.foreground }]}
               value={query}
               onChangeText={setQuery}
               placeholder="搜地址/域名/ID"
               placeholderTextColor={colors.muted}
               onSubmitEditing={handleSearch}
               returnKeyType="search"
-            autoCapitalize="none"
-          />
+              autoCapitalize="none"
+            />
+            {query.trim() ? (
+              <Pressable
+                onPress={handleResetSearch}
+                hitSlop={8}
+                style={({ pressed }) => [
+                  styles.searchFieldClearButton,
+                  { opacity: pressed ? 0.72 : 1 },
+                ]}
+              >
+                <IconSymbol name="xmark.circle.fill" size={14} color={colors.muted} />
+              </Pressable>
+            ) : null}
+          </View>
+          <Pressable
+            hitSlop={COMPACT_HIT_SLOP}
+            onPress={handleSearch}
+            style={({ pressed }) => [
+              styles.mailSearchIconButton,
+              { backgroundColor: colors.primary, opacity: pressed ? 0.8 : 1 },
+            ]}
+          >
+            <IconSymbol name="magnifyingglass" size={15} color="#FFFFFF" />
+          </Pressable>
         </View>
         <SwipeSuspendView>
           <ScrollView
@@ -3380,9 +3585,6 @@ function AddressesPanel({
                 <Text style={{ color: colors.border }}> · </Text>
                 <Text style={{ color: colors.muted }}>{addressStatusSummary}</Text>
               </Text>
-              {isSyncing || (needsCompleteAddressIndex && addressIndexStatus === "loading") ? (
-                <InlineSyncBadge colors={colors} compact />
-              ) : null}
             </View>
           </View>
           <View style={styles.addressToolbarActions}>
@@ -3510,34 +3712,6 @@ function AddressesPanel({
             >
               <Text style={styles.primaryActionText}>创建邮箱</Text>
             </Pressable>
-            {query.trim() ? (
-              <Pressable
-                hitSlop={COMPACT_HIT_SLOP}
-                onPress={handleResetSearch}
-                style={({ pressed }) => [
-                  styles.ghostActionButton,
-                  {
-                    backgroundColor: colors.surface,
-                    borderColor: colors.border,
-                    opacity: pressed ? 0.7 : 1,
-                  },
-                ]}
-              >
-                <Text style={[styles.ghostActionText, { color: colors.muted }]}>
-                  清空
-                </Text>
-              </Pressable>
-            ) : null}
-            <Pressable
-              hitSlop={COMPACT_HIT_SLOP}
-              onPress={handleSearch}
-              style={({ pressed }) => [
-                styles.primaryActionButton,
-                { backgroundColor: colors.primary, opacity: pressed ? 0.8 : 1 },
-              ]}
-            >
-              <Text style={styles.primaryActionText}>搜索</Text>
-            </Pressable>
               </>
             )}
           </View>
@@ -3644,12 +3818,9 @@ function AddressesPanel({
               refreshing={isRefreshing}
               onRefresh={() => {
                 void load(0, query, { refresh: true });
-                if (selectedUserId === "all") {
-                  void loadAddressIndex({ force: true, quiet: true });
-                }
+                requestAddressIndexIfNeeded({ force: true, quiet: true });
               }}
-              tintColor={colors.primary}
-              colors={[colors.primary]}
+              {...getAdminRefreshControlProps(colors)}
             />
           }
           onEndReached={() => {
@@ -3696,7 +3867,8 @@ function AddressesPanel({
             )
           }
           ListFooterComponent={
-            isLoading || (needsCompleteAddressIndex && addressIndexStatus === "loading") ? (
+            (isLoading || (needsCompleteAddressIndex && addressIndexStatus === "loading")) &&
+            filteredData.length > 0 ? (
               <ActivityIndicator style={{ marginVertical: 20 }} color={colors.primary} />
             ) : null
           }
@@ -3957,12 +4129,18 @@ function AddressesPanel({
 
                   <Pressable
                     onPress={handleCreate}
-                    disabled={isCreating || !newName.trim() || !selectedDomain}
+                    disabled={
+                      isCreating ||
+                      !newName.trim() ||
+                      !selectedDomain
+                    }
                     style={({ pressed }) => [
                       styles.createButton,
                       {
                         backgroundColor:
-                          isCreating || !newName.trim() || !selectedDomainItem
+                          isCreating ||
+                          !newName.trim() ||
+                          !selectedDomainItem
                             ? colors.muted
                             : colors.primary,
                         opacity: pressed ? 0.8 : 1,
@@ -4192,6 +4370,21 @@ function AddressesPanel({
                   onCopy={() => handleCopySecret("密码", showCred.password!)}
                 />
               ) : null}
+              {showCred?.jwt && (() => {
+                const profile = mailState.workerProfiles.find(
+                  (p) => p.id === mailState.activeWorkerProfileId
+                ) || mailState.workerProfiles[0];
+                return profile?.frontendUrl ? (
+                  <AddressLoginLinkField
+                    frontendUrl={profile.frontendUrl}
+                    jwt={showCred.jwt}
+                    address={showCred.address}
+                    colors={colors}
+                    onCopy={(link) => handleCopySecret("登录链接", link)}
+                    onOpen={(link) => openLoginLink(link)}
+                  />
+                ) : null;
+              })()}
 
               <Pressable
                 onPress={() => setShowCred(null)}
@@ -4257,7 +4450,8 @@ function MailsPanel({
   const [count, setCount] = useState(0);
   const [offset, setOffset] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [mailGroupFilter, setMailGroupFilter] = useState<"all" | "ungrouped" | string>("all");
   const [showMailGroupFilterMenu, setShowMailGroupFilterMenu] = useState(false);
@@ -4487,6 +4681,14 @@ function MailsPanel({
         offset: nextOffset,
         fetchedAt: Date.now(),
       });
+      // 持久化缓存：只针对主面板（无搜索词、不在搜索数据集模式），用于软件被杀掉重启后秒开
+      if (!queryToken || queryToken === "*") {
+        void writeAdminMailCache(
+          panelCacheKind as AdminMailPersistedCacheKind,
+          mailWorkerScope,
+          { count: nextCount, offset: nextOffset, mails: nextData }
+        ).catch(() => {});
+      }
       const applyState = () => {
         setData(nextData);
         setCount(nextCount);
@@ -4503,10 +4705,16 @@ function MailsPanel({
   );
 
   const clearKindCaches = useCallback(() => {
-    clearAdminMailCacheKinds(
-      panelCacheKind === "spam" ? ["spam", "inbox", "unknown"] : [panelCacheKind],
-      mailWorkerScope
-    );
+    const kinds: AdminMailCacheKind[] =
+      panelCacheKind === "spam" ? ["spam", "inbox", "unknown"] : [panelCacheKind];
+    clearAdminMailCacheKinds(kinds, mailWorkerScope);
+    // 同步清掉持久化缓存
+    for (const k of kinds) {
+      void clearAdminMailPersistedCache(
+        k as AdminMailPersistedCacheKind,
+        mailWorkerScope
+      ).catch(() => {});
+    }
   }, [mailWorkerScope, panelCacheKind]);
 
   const hydrateCachedPanel = useCallback(
@@ -4522,19 +4730,71 @@ function MailsPanel({
     [address, commitPanelState, mailWorkerScope, panelCacheKind]
   );
 
+  // 启动后一次性：从 AsyncStorage 读出之前缓存的邮件，立即灌入内存缓存
+  // 这样软件被杀掉重启后，主面板第一帧就能看到旧邮件，不会空白
+  const persistedHydrateRef = useRef(false);
+  useEffect(() => {
+    if (persistedHydrateRef.current) return;
+    if (!mailWorkerScope) return;
+
+    let cancelled = false;
+    persistedHydrateRef.current = true;
+
+    void (async () => {
+      try {
+        const persisted = await readAdminMailCache(
+          panelCacheKind as AdminMailPersistedCacheKind,
+          mailWorkerScope
+        );
+        if (cancelled || !persisted) return;
+        // 已经有数据（来自更上层的内存缓存或本次 fetch）就不要覆盖
+        if (dataRef.current.length > 0) return;
+        const queryToken = normalizeAdminMailQuery("");
+        // 写入内存缓存，让 hydrateCachedPanel/UI 立即能拿到
+        adminMailPanelCache.set(
+          buildAdminMailCacheKey(panelCacheKind, queryToken, mailWorkerScope),
+          {
+            count: persisted.count,
+            data: persisted.mails,
+            offset: persisted.offset,
+            fetchedAt: 0, // fetchedAt=0 → 强制视为过期，进入后台增量刷新
+          }
+        );
+        // 立即渲染
+        dataRef.current = persisted.mails;
+        countRef.current = persisted.count;
+        offsetRef.current = persisted.offset;
+        queryRef.current = queryToken;
+        setData(persisted.mails);
+        setCount(persisted.count);
+        setOffset(persisted.offset);
+        setHasLoadedOnce(true);
+      } catch {
+        // ignore
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mailWorkerScope, panelCacheKind]);
+
   const load = useCallback(
     async (
       freshOffset: number = 0,
       addr: string = address,
-      options?: { silent?: boolean; background?: boolean }
+      options?: { silent?: boolean; background?: boolean; refresh?: boolean }
     ) => {
       const silent = !!options?.silent;
       const background = !!options?.background;
+      const refresh = !!options?.refresh;
       const requestId = ++requestIdRef.current;
       const queryToken = normalizeAdminMailQuery(addr);
-      if (background && dataRef.current.length > 0) {
-        setIsSyncing(true);
-      } else if (!silent) {
+      if (refresh) {
+        setIsRefreshing(true);
+      } else if (!silent && freshOffset > 0) {
+        setIsLoadingMore(true);
+      } else if (!silent && dataRef.current.length === 0) {
         setIsLoading(true);
       }
       try {
@@ -4579,7 +4839,7 @@ function MailsPanel({
         const nextData =
           freshOffset === 0
             ? isSameQuery && dataRef.current.length > 0
-              ? mergeMailLists(dataRef.current, parsed)
+              ? mergeAuthoritativeFirstPage(dataRef.current, sortMailsDesc(parsed), page.count)
               : parsed
             : mergeMailLists(dataRef.current, parsed);
         const nextOffset =
@@ -4608,8 +4868,11 @@ function MailsPanel({
           Alert.alert("加载失败", err.message || "");
         }
       } finally {
-        if (requestId === requestIdRef.current && background) {
-          setIsSyncing(false);
+        if (requestId === requestIdRef.current && refresh) {
+          setIsRefreshing(false);
+        }
+        if (requestId === requestIdRef.current && freshOffset > 0) {
+          setIsLoadingMore(false);
         }
         if (requestId === requestIdRef.current && !silent) {
           setIsLoading(false);
@@ -4629,12 +4892,16 @@ function MailsPanel({
   );
 
   const loadSearchDataset = useCallback(
-    async (refresh: boolean = false, options?: { silent?: boolean; background?: boolean }) => {
+    async (
+      refresh: boolean = false,
+      options?: { silent?: boolean; background?: boolean; refresh?: boolean }
+    ) => {
       const silent = !!options?.silent;
       const background = !!options?.background;
+      const pullRefresh = !!options?.refresh;
       const requestId = ++requestIdRef.current;
-      if (background && dataRef.current.length > 0) {
-        setIsSyncing(true);
+      if (pullRefresh) {
+        setIsRefreshing(true);
       } else if (!silent) {
         setIsLoading(true);
       }
@@ -4734,8 +5001,8 @@ function MailsPanel({
           Alert.alert("搜索失败", err.message || "");
         }
       } finally {
-        if (requestId === requestIdRef.current && background) {
-          setIsSyncing(false);
+        if (requestId === requestIdRef.current && pullRefresh) {
+          setIsRefreshing(false);
         }
         if (requestId === requestIdRef.current && !silent) {
           setIsLoading(false);
@@ -5468,7 +5735,7 @@ function MailsPanel({
                   : "收件箱"
           }
           summary={summaryText}
-          isSyncing={isSyncing || isLoading}
+          isSyncing={false}
           canMarkAllRead={kind !== "sendbox"}
           hasUnread={unreadMailKeys.size > 0}
           onMarkAllRead={handleMarkAllRead}
@@ -5554,19 +5821,18 @@ function MailsPanel({
         keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
-            refreshing={isLoading && data.length > 0}
+            refreshing={isRefreshing}
               onRefresh={() => {
                 if (address.trim()) {
                   void loadSearchDataset(
                     true,
-                    dataRef.current.length > 0 ? { background: true } : undefined
+                    { refresh: true }
                   );
                 } else {
-                  void load(0, "", { silent: false });
+                  void load(0, "", { refresh: true });
                 }
               }}
-            tintColor={colors.primary}
-            colors={[colors.primary]}
+            {...getAdminRefreshControlProps(colors)}
           />
         }
           onEndReached={() => {
@@ -5576,7 +5842,7 @@ function MailsPanel({
           }}
         onEndReachedThreshold={0.5}
         ListFooterComponent={
-          isLoading && !address.trim() ? (
+          isLoadingMore && !address.trim() ? (
             <ActivityIndicator style={{ margin: 20 }} color={colors.primary} />
           ) : null
         }
@@ -5596,7 +5862,7 @@ function MailsPanel({
                 {emptyConfig.subtitle}
               </Text>
             </View>
-          ) : (
+          ) : isLoading && !hasLoadedOnce ? (
             <View style={styles.centerAll}>
               <ActivityIndicator color={colors.primary} />
               <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
@@ -5606,7 +5872,7 @@ function MailsPanel({
                 邮件列表正在后台预热。
               </Text>
             </View>
-          )
+          ) : null
         }
       />
     </View>
@@ -5932,6 +6198,7 @@ const AddressListItem = React.memo(function AddressListItem({
   onOpen,
   onGroup,
   onShowCredential,
+  onLoginLink,
   onClearInbox,
   onDelete,
   selectionMode = false,
@@ -5946,6 +6213,7 @@ const AddressListItem = React.memo(function AddressListItem({
   onOpen: (item: AdminAddress) => void;
   onGroup: (item: AdminAddress) => void;
   onShowCredential: (item: AdminAddress) => void;
+  onLoginLink: (item: AdminAddress) => void;
   onClearInbox: (item: AdminAddress) => void;
   onDelete: (item: AdminAddress) => void;
   selectionMode?: boolean;
@@ -5953,18 +6221,12 @@ const AddressListItem = React.memo(function AddressListItem({
   onToggleSelect?: (item: AdminAddress) => void;
   onLongPress?: (item: AdminAddress) => void;
 }) {
-  const updatedText = useMemo(
-    () =>
-      item.updated_at
-        ? new Date(item.updated_at).toLocaleString("zh-CN", {
-            month: "numeric",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          })
-        : null,
-    [item.updated_at]
-  );
+  const addressTimeText = useMemo(() => {
+    const timestamp = getAddressDisplayTimestamp(item);
+    if (!timestamp) return null;
+    const formatted = formatShanghaiShortDateTime(timestamp.value);
+    return formatted ? `${timestamp.label} ${formatted}` : null;
+  }, [item]);
 
   return (
     <Pressable
@@ -6006,7 +6268,7 @@ const AddressListItem = React.memo(function AddressListItem({
             />
           </View>
           <HighlightText
-            text={`#${item.id}${updatedText ? ` · 更新于 ${updatedText}` : ""}`}
+            text={`#${item.id}${addressTimeText ? ` · ${addressTimeText}` : ""}`}
             query={query}
             style={[styles.addressSubtitle, { color: colors.muted }]}
             highlightStyle={highlightStyle}
@@ -6069,6 +6331,21 @@ const AddressListItem = React.memo(function AddressListItem({
         >
           <Text style={[styles.addressCompactActionText, { color: colors.primary }]}>
             凭证
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => onLoginLink(item)}
+          style={({ pressed }) => [
+            styles.addressCompactAction,
+            {
+              backgroundColor: `${colors.primary}12`,
+              borderColor: `${colors.primary}22`,
+              opacity: pressed ? 0.72 : 1,
+            },
+          ]}
+        >
+          <Text style={[styles.addressCompactActionText, { color: colors.primary }]}>
+            登录链接
           </Text>
         </Pressable>
         <Pressable
@@ -6152,7 +6429,7 @@ const MailListItem = React.memo(function MailListItem({
     kind === "unknown" && !!createdUnknownAddresses[createdUnknownKey];
   const canCreateUnknownAddress = !!splitMailboxAddress(unknownRecipientAddress);
   const showUnknownCreate = kind === "unknown";
-  const formattedDate = formatMailDate(item.date || item.createdAt);
+  const formattedDate = formatMailDate(item.createdAt || item.date);
   const tertiaryMeta =
     kind === "sendbox"
       ? `发件 ${
@@ -6656,51 +6933,6 @@ function PanelStateCard({
   );
 }
 
-function InlineSyncBadge({
-  colors,
-  compact = false,
-  textFirst = false,
-}: {
-  colors: ReturnType<typeof useColors>;
-  compact?: boolean;
-  textFirst?: boolean;
-}) {
-  return (
-    <View
-      style={[
-        styles.inlineSyncBadge,
-        compact ? styles.inlineSyncBadgeCompact : null,
-      ]}
-    >
-      {textFirst ? (
-        <>
-          <Text style={[styles.inlineSyncBadgeText, { color: colors.primary }]}>
-            更新中
-          </Text>
-          <View
-            style={[
-              styles.inlineSyncDot,
-              { backgroundColor: colors.primary },
-            ]}
-          />
-        </>
-      ) : (
-        <>
-          <View
-            style={[
-              styles.inlineSyncDot,
-              { backgroundColor: colors.primary },
-            ]}
-          />
-          <Text style={[styles.inlineSyncBadgeText, { color: colors.primary }]}>
-            更新中
-          </Text>
-        </>
-      )}
-    </View>
-  );
-}
-
 function MailPanelStatusBar({
   colors,
   title,
@@ -6975,6 +7207,84 @@ function AddressCredentialField({
           {value}
         </Text>
       </View>
+    </View>
+  );
+}
+
+function AddressLoginLinkField({
+  frontendUrl,
+  jwt,
+  address,
+  colors,
+  onCopy,
+  onOpen,
+}: {
+  frontendUrl: string;
+  jwt: string;
+  address: string;
+  colors: ReturnType<typeof useColors>;
+  onCopy: (link: string) => void;
+  onOpen: (link: string) => void;
+}) {
+  const loginLink = useMemo(() => {
+    const base = frontendUrl.replace(/\/+$/, "");
+    return `${base}/?jwt=${jwt}`;
+  }, [frontendUrl, jwt]);
+
+  return (
+    <View style={styles.credentialFieldWrap}>
+      <View style={styles.credentialFieldHeader}>
+        <Text style={[styles.credentialFieldLabel, { color: colors.muted }]}>
+          一键登录链接
+        </Text>
+        <View style={styles.credentialFieldActions}>
+          <Pressable
+            onPress={() => onOpen(loginLink)}
+            style={({ pressed }) => [
+              styles.credentialCopyButton,
+              {
+                backgroundColor: `${colors.primary}12`,
+                borderColor: `${colors.primary}22`,
+                opacity: pressed ? 0.7 : 1,
+              },
+            ]}
+          >
+            <IconSymbol name="safari" size={13} color={colors.primary} />
+            <Text style={[styles.credentialCopyText, { color: colors.primary }]}>打开</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => onCopy(loginLink)}
+            style={({ pressed }) => [
+              styles.credentialCopyButton,
+              {
+                backgroundColor: `${colors.primary}12`,
+                borderColor: `${colors.primary}22`,
+                opacity: pressed ? 0.7 : 1,
+              },
+            ]}
+          >
+            <IconSymbol name="doc.on.doc" size={13} color={colors.primary} />
+            <Text style={[styles.credentialCopyText, { color: colors.primary }]}>复制</Text>
+          </Pressable>
+        </View>
+      </View>
+      <View
+        style={[
+          styles.credentialValueCard,
+          { backgroundColor: colors.surface, borderColor: colors.border },
+        ]}
+      >
+        <Text
+          selectable
+          style={[styles.credentialValueText, { color: colors.foreground }]}
+          numberOfLines={2}
+        >
+          {loginLink}
+        </Text>
+      </View>
+      <Text style={[styles.loginLinkHint, { color: colors.muted }]}>
+        在浏览器打开此链接可直接登录 {address}
+      </Text>
     </View>
   );
 }
@@ -8419,6 +8729,14 @@ const styles = StyleSheet.create({
     fontFamily: "Courier",
     fontSize: 13,
     lineHeight: 19,
+  },
+  credentialFieldActions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  loginLinkHint: {
+    fontSize: 11,
+    lineHeight: 16,
   },
   sendHeroCard: {
     flexDirection: "row",

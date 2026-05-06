@@ -42,6 +42,7 @@ import {
   getSenderDisplay,
   getVerificationCode,
 } from "@/lib/mail-parser";
+import { formatShanghaiFullDateTime } from "@/lib/time";
 
 function getKindLabel(kind?: "inbox" | "sendbox" | "unknown") {
   if (kind === "sendbox") return "管理员发件";
@@ -50,31 +51,10 @@ function getKindLabel(kind?: "inbox" | "sendbox" | "unknown") {
 }
 
 function formatShanghaiDateTime(dateStr?: string) {
-  if (!dateStr) return "—";
-
-  try {
-    const date = new Date(dateStr);
-    if (Number.isNaN(date.getTime())) {
-      return dateStr;
-    }
-
-    const parts = new Intl.DateTimeFormat("zh-CN", {
-      timeZone: "Asia/Shanghai",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }).formatToParts(date);
-
-    const get = (type: string) => parts.find((item) => item.type === type)?.value || "00";
-    return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")} 上海时间`;
-  } catch {
-    return dateStr;
-  }
+  const formatted = formatShanghaiFullDateTime(dateStr);
+  return formatted === "—" ? formatted : `${formatted} 上海时间`;
 }
+
 
 export default function AdminMailDetailScreen() {
   const colors = useColors();

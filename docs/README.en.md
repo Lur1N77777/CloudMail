@@ -3,7 +3,7 @@
 
 # CloudMail
 
-**V1.1.1 · Multi-Worker mobile admin app for Cloudflare Temp Email systems**
+**V1.1.2 · Faster and more stable mobile admin app for Cloudflare Temp Email systems**
 
 [![CI](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml/badge.svg)](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
@@ -25,19 +25,17 @@ The upstream project provides the Cloudflare Worker mailbox backend, web admin U
 
 CloudMail is **administrator-first**: first launch opens admin setup, and a valid configuration opens the admin console directly.
 
-## What's new in V1.1.1
+## What's new in V1.1.2
 
-V1.1.1 adds multi Cloudflare account / multi Worker support for setups where different Cloudflare accounts run separate Worker deployments.
+V1.1.2 focuses on first-run reliability, refresh behavior, and large-data administration. The admin console now opens faster, keeps cached content visible, and behaves better when managing many mailboxes.
 
-- **Multiple Worker profiles**: `Workers configuration` is now a profile list. Each profile can store a name, Worker URL, admin password, site password, and cached domain list.
-- **Automatic migration**: existing single-Worker installations are migrated into a `Default account` profile, so users do not need to reconfigure the app after upgrading.
-- **Quick Worker switching**: the admin header shows the current Worker, such as `Account A ▾`, and lets admins switch the active management scope quickly.
-- **Domain-based address creation**: creating an address routes the request to the Worker that owns the selected domain. If account B owns `4.com`, selecting `4.com` uses account B's Worker automatically.
-- **Clear domain ownership**: the domain picker labels entries by Worker, such as `4.com · Account B`; duplicated domains are treated as conflicts instead of being selected silently.
-- **Unknown-recipient creation routing**: one-tap creation from unknown-recipient mail also resolves the target Worker by domain.
-- **Worker-scoped local state**: accounts, mail cache, unread dots, spam rules, and local address groups remain isolated per Worker. The same email address can exist under different Workers without overwriting another account.
-- **Safer connection tests**: testing a Worker validates settings and admin login, refreshes domains, and avoids writing stale async results over newer edits.
-- **No Cloudflare official API dependency**: multi-account support is implemented as local Worker profiles; no Cloudflare token is required.
+- **Faster admin entry**: saving Workers configuration now writes local settings first and opens the admin console immediately. Admin re-checks, statistics, and warm-up requests run later on demand instead of blocking the setup button.
+- **Cache-first address page**: the address list now has persisted cache. It shows the last known data first, then refreshes in the background, so returning after deletes or page switches no longer flashes to an empty list.
+- **Remote deletion sync**: background refresh treats the server's first page as authoritative for the visible window, so addresses and mail deleted from the web admin are corrected on mobile refresh instead of staying in cache forever.
+- **More stable large address sets**: the full address index used by groups/search now has cache support, and pagination offsets are corrected after delete/batch actions to avoid empty locked lists with 800+ addresses.
+- **Mail cache and incremental refresh**: inbox, sent, unknown, and single-address mail lists continue to use cache-first rendering, paged loading, and background incremental updates for faster first paint.
+- **Cleaner refresh UI**: duplicate top “updating” indicators were removed. Each page now keeps one pull-to-refresh or footer spinner, with themed RefreshControl backgrounds for dark and OLED black modes.
+- **Time display fix**: Worker timestamps are parsed consistently and displayed in Shanghai time, preventing list timestamps from disagreeing with the detail view.
 
 ## Highlights
 

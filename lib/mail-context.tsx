@@ -10,6 +10,7 @@ import { AppState } from "react-native";
 import {
   getConfig,
   saveConfig,
+  primeRuntimeConfigSnapshot,
   buildMailAccountIdentityKey,
   getWorkerProfiles,
   saveWorkerProfiles,
@@ -26,9 +27,9 @@ import {
   fetchUserAddressSettings,
   createAddress,
   fetchMailHistory,
-  fetchMails,
-  fetchSentMails,
+  fetchMailsSince,
   fetchSentMailHistory,
+  fetchSentMailsSince,
   deleteMail as apiDeleteMail,
   deleteSentMail as apiDeleteSentMail,
   clearInbox as apiClearInbox,
@@ -54,6 +55,7 @@ import {
 import { readMailboxCache, writeMailboxCache } from "./mail-cache";
 import { mergeMailLists, sortMailsDesc } from "./mail-list-utils";
 import { parseMailBatch } from "./mail-parser";
+import { getSyncAnchor, setSyncAnchor, buildAnchorFromMails, clearSyncAnchor } from "./mail-sync-anchor";
 
 function findMailAccountIndex(accounts: MailAccount[], account: MailAccount) {
   const targetKey = buildMailAccountIdentityKey(account);
@@ -65,6 +67,37 @@ function findMailAccountIndex(accounts: MailAccount[], account: MailAccount) {
 function normalizeEmailDomain(email: string) {
   const parts = email.trim().toLowerCase().split("@");
   return parts.length >= 2 ? parts.pop()?.trim() || "" : "";
+}
+
+function getAccountMailboxCacheInput(
+  account: MailAccount,
+  box: "inbox" | "sent",
+  fallbackWorkerUrl?: string
+) {
+  return {
+    workerUrl: account.workerUrl || fallbackWorkerUrl || "",
+    address: account.address,
+    box,
+  };
+}
+
+async function readCachedMailboxesForAccount(
+  account: MailAccount | undefined,
+  fallbackWorkerUrl?: string
+) {
+  if (!account) {
+    return { inbox: [] as ParsedMail[], sent: [] as ParsedMail[] };
+  }
+
+  const [cachedInbox, cachedSent] = await Promise.all([
+    readMailboxCache(getAccountMailboxCacheInput(account, "inbox", fallbackWorkerUrl)),
+    readMailboxCache(getAccountMailboxCacheInput(account, "sent", fallbackWorkerUrl)),
+  ]);
+
+  return {
+    inbox: sortMailsDesc(cachedInbox),
+    sent: sortMailsDesc(cachedSent),
+  };
 }
 
 // ─── State ──────────────────────────────────────────────────────
@@ -240,6 +273,11 @@ interface MailContextValue {
     activeProfileId: string,
     refreshInterval: number
   ) => Promise<void>;
+  saveWorkerProfilesAndEnterAdminLocally: (
+    profiles: WorkerProfile[],
+    activeProfileId: string,
+    refreshInterval: number
+  ) => void;
   switchWorkerProfile: (profileId: string) => Promise<void>;
   reloadWorkerProfiles: () => Promise<void>;
   loadSettings: (options?: {
@@ -272,6 +310,7 @@ interface MailContextValue {
   importByPassword: (email: string, password: string) => Promise<void>;
   changePassword: (newPassword: string, oldPassword?: string) => Promise<void>;
   saveAutoReply: (autoReply: AutoReply) => Promise<void>;
+  enterAdminModeLocally: (password?: string) => Promise<void>;
   enterAdminMode: (password: string) => Promise<void>;
   exitAdminMode: () => void;
   clearError: () => void;
@@ -286,6 +325,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mailsRef = useRef<ParsedMail[]>([]);
   const sentMailsRef = useRef<ParsedMail[]>([]);
+  const inboxSyncPromiseRef = useRef<Promise<void> | null>(null);
+  const sentSyncPromiseRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     mailsRef.current = state.mails;
@@ -364,24 +405,49 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
 
   // ── Initialize ──
   const initialize = useCallback(async () => {
-    try {
-      const workerProfiles = await getWorkerProfiles();
-      const [config, activeWorkerProfileId, accounts, activeIndex] = await Promise.all([
-        getConfig(),
-        getActiveWorkerProfileId(),
-        getAccounts(),
-        getActiveAccountIndex(),
-      ]);
-      let shouldEnterAdminMode = false;
-
-      if (config.workerUrl && config.adminPassword) {
-        try {
-          await apiAdminLogin(config.adminPassword);
-          shouldEnterAdminMode = true;
-        } catch {
-          shouldEnterAdminMode = false;
-        }
+    const safeAwait = async <T,>(
+      promise: Promise<T>,
+      fallback: T,
+      timeoutMs = 5000
+    ): Promise<T> => {
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<T>((resolve) =>
+            setTimeout(() => resolve(fallback), timeoutMs)
+          ),
+        ]);
+      } catch {
+        return fallback;
       }
+    };
+
+    try {
+      const workerProfiles = await safeAwait(getWorkerProfiles(), [] as WorkerProfile[]);
+      const [config, activeWorkerProfileId, accounts, activeIndex] = await Promise.all([
+        safeAwait(getConfig(), {
+          workerUrl: "",
+          adminPassword: "",
+          sitePassword: "",
+          refreshInterval: 30,
+          lang: "zh",
+        }),
+        safeAwait(getActiveWorkerProfileId(), ""),
+        safeAwait(getAccounts(), [] as MailAccount[]),
+        safeAwait(getActiveAccountIndex(), 0),
+      ]);
+      const storedActiveIndex = Number.isFinite(activeIndex) ? activeIndex : 0;
+      const normalizedActiveIndex = Math.min(
+        storedActiveIndex,
+        Math.max(0, accounts.length - 1)
+      );
+      const activeAccount = accounts[normalizedActiveIndex];
+      const cachedMailboxes = await safeAwait(
+        readCachedMailboxesForAccount(activeAccount, config.workerUrl),
+        { inbox: [] as ParsedMail[], sent: [] as ParsedMail[] }
+      );
+      mailsRef.current = cachedMailboxes.inbox;
+      sentMailsRef.current = cachedMailboxes.sent;
 
       dispatch({
         type: "INIT",
@@ -394,15 +460,33 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
           workerProfiles,
           activeWorkerProfileId,
           accounts,
-          activeAccountIndex: Math.min(
-            activeIndex,
-            Math.max(0, accounts.length - 1)
-          ),
-          isAdminMode: shouldEnterAdminMode,
+          activeAccountIndex: normalizedActiveIndex,
+          mails: cachedMailboxes.inbox,
+          sentMails: cachedMailboxes.sent,
+          isAdminMode: !!(config.workerUrl && config.adminPassword),
         },
       });
     } catch {
-      dispatch({ type: "SET_ERROR", payload: "初始化失败" });
+      mailsRef.current = [];
+      sentMailsRef.current = [];
+      dispatch({
+        type: "INIT",
+        payload: {
+          workerUrl: "",
+          adminPassword: "",
+          sitePassword: "",
+          refreshInterval: 30,
+          isConfigured: false,
+          workerProfiles: [],
+          activeWorkerProfileId: "",
+          accounts: [],
+          activeAccountIndex: 0,
+          mails: [],
+          sentMails: [],
+          isAdminMode: false,
+        },
+      });
+      dispatch({ type: "SET_ERROR", payload: "初始化失败，请重新检查配置" });
     }
   }, []);
 
@@ -469,6 +553,70 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const saveWorkerProfilesAndEnterAdminLocally = useCallback((
+    profiles: WorkerProfile[],
+    activeProfileId: string,
+    refreshInterval: number
+  ) => {
+    const activeProfile =
+      profiles.find((profile) => profile.id === activeProfileId) || profiles[0];
+    if (!activeProfile?.workerUrl || !activeProfile.adminPassword) {
+      throw new Error("请先配置 Worker 地址和管理员密码");
+    }
+
+    primeRuntimeConfigSnapshot({
+      workerUrl: activeProfile.workerUrl,
+      adminPassword: activeProfile.adminPassword,
+      sitePassword: activeProfile.sitePassword || "",
+      refreshInterval,
+      lang: "zh",
+    });
+
+    dispatch({
+      type: "SET_CONFIG",
+      payload: {
+        workerUrl: activeProfile.workerUrl,
+        adminPassword: activeProfile.adminPassword,
+        sitePassword: activeProfile.sitePassword || "",
+        refreshInterval,
+        workerProfiles: profiles,
+        activeWorkerProfileId: activeProfile.id,
+      },
+    });
+    dispatch({ type: "SET_SETTINGS", payload: null });
+    dispatch({ type: "SET_ADMIN_MODE", payload: true });
+    dispatch({ type: "SET_SUCCESS", payload: "已进入管理员模式" });
+
+    void (async () => {
+      try {
+        const savedProfiles = await saveWorkerProfiles(profiles);
+        await setActiveWorkerProfileId(activeProfile.id || savedProfiles[0]?.id || "");
+        await saveConfig({ refreshInterval });
+        const [config, nextProfiles, nextActiveId] = await Promise.all([
+          getConfig(),
+          getWorkerProfiles(),
+          getActiveWorkerProfileId(),
+        ]);
+        dispatch({
+          type: "SET_CONFIG",
+          payload: {
+            workerUrl: config.workerUrl || activeProfile.workerUrl,
+            adminPassword: config.adminPassword || activeProfile.adminPassword,
+            sitePassword: config.sitePassword || activeProfile.sitePassword || "",
+            refreshInterval: config.refreshInterval || refreshInterval,
+            workerProfiles: nextProfiles.length > 0 ? nextProfiles : profiles,
+            activeWorkerProfileId: nextActiveId || activeProfile.id,
+          },
+        });
+      } catch {
+        dispatch({
+          type: "SET_ERROR",
+          payload: "配置已进入后台，本地持久化保存失败，请稍后在设置中再保存一次",
+        });
+      }
+    })();
+  }, []);
+
   const reloadWorkerProfiles = useCallback(async () => {
     const [workerProfiles, activeWorkerProfileId] = await Promise.all([
       getWorkerProfiles(),
@@ -501,6 +649,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       });
       dispatch({ type: "SET_SETTINGS", payload: null });
       dispatch({ type: "SET_USER_SETTINGS", payload: null });
+      mailsRef.current = [];
+      sentMailsRef.current = [];
       dispatch({ type: "SET_MAILS", payload: [] });
       dispatch({ type: "SET_SENT_MAILS", payload: [] });
       dispatch({ type: "SET_SUCCESS", payload: "已切换 Worker" });
@@ -577,7 +727,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
           address: result.address,
           jwt: result.jwt,
           addressId: result.address_id,
-          password: result.password,
+          password: result.password || undefined,
           createdAt: new Date().toISOString(),
           workerProfileId: targetWorker?.id,
           workerUrl: targetWorker?.workerUrl || state.workerUrl,
@@ -597,7 +747,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         return {
           address: result.address,
           jwt: result.jwt,
-          password: result.password,
+          password: result.password || undefined,
         };
       } catch (err: any) {
         dispatch({
@@ -621,6 +771,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: "SET_USER_SETTINGS", payload: null });
 
       if (!nextAccount) {
+        mailsRef.current = [];
+        sentMailsRef.current = [];
         dispatch({ type: "SET_MAILS", payload: [] });
         dispatch({ type: "SET_SENT_MAILS", payload: [] });
         return;
@@ -631,8 +783,12 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         readMailboxCache(getMailboxCacheInput(nextAccount, "sent")),
       ]);
 
-      dispatch({ type: "SET_MAILS", payload: sortMailsDesc(cachedInbox) });
-      dispatch({ type: "SET_SENT_MAILS", payload: sortMailsDesc(cachedSent) });
+      const nextInbox = sortMailsDesc(cachedInbox);
+      const nextSent = sortMailsDesc(cachedSent);
+      mailsRef.current = nextInbox;
+      sentMailsRef.current = nextSent;
+      dispatch({ type: "SET_MAILS", payload: nextInbox });
+      dispatch({ type: "SET_SENT_MAILS", payload: nextSent });
     },
     [getMailboxCacheInput]
   );
@@ -667,6 +823,8 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
           type: "SET_ACCOUNTS",
           payload: { accounts, activeIndex },
         });
+        mailsRef.current = [];
+        sentMailsRef.current = [];
         dispatch({ type: "SET_MAILS", payload: [] });
         dispatch({ type: "SET_SENT_MAILS", payload: [] });
         dispatch({ type: "SET_SUCCESS", payload: "邮箱已移除" });
@@ -679,123 +837,345 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
 
   // ── Load Mails ──
   const loadMails = useCallback(async () => {
-    const accounts = await getAccounts();
-    const activeIndex = await getActiveAccountIndex();
-    const account = accounts[activeIndex];
-    if (!account) return;
-
-    const cacheInput = getMailboxCacheInput(account, "inbox");
-    const cached = await readMailboxCache(cacheInput);
-    if (cached.length > 0) {
-      dispatch({ type: "SET_MAILS", payload: sortMailsDesc(cached) });
+    if (inboxSyncPromiseRef.current) {
+      await inboxSyncPromiseRef.current;
+      return;
     }
 
-    dispatch({ type: "SET_LOADING_MAILS", payload: true });
+    const syncTask = (async () => {
+      const accounts = await getAccounts();
+      const activeIndex = await getActiveAccountIndex();
+      const normalizedActiveIndex = Number.isFinite(activeIndex) ? activeIndex : 0;
+      const account = accounts[normalizedActiveIndex] || accounts[0];
+      if (!account) return;
+
+      const cacheInput = getMailboxCacheInput(account, "inbox");
+      const syncScope = {
+        workerUrl: cacheInput.workerUrl,
+        address: account.address,
+        box: "inbox" as const,
+      };
+      const cached = await readMailboxCache(cacheInput);
+      if (cached.length > 0) {
+        const cachedMails = sortMailsDesc(cached);
+        mailsRef.current = cachedMails;
+        dispatch({ type: "SET_MAILS", payload: cachedMails });
+      }
+
+      dispatch({ type: "SET_LOADING_MAILS", payload: true });
+      try {
+        const apiOptions = await getAccountApiOptions(account);
+        let anchor = await getSyncAnchor(syncScope);
+        if (!anchor && mailsRef.current.length > 0) {
+          const cachedAnchor = buildAnchorFromMails(mailsRef.current);
+          if (cachedAnchor) {
+            anchor = cachedAnchor;
+            await setSyncAnchor(syncScope, cachedAnchor);
+          }
+        }
+
+        let parsed: ParsedMail[];
+        if (anchor) {
+          const result = await fetchMailsSince(
+            account.jwt,
+            anchor.latestMailId,
+            apiOptions
+          );
+          parsed = await parseMailBatch(result.newMails);
+          if (result.newMails.length > 0 && !result.hasMore) {
+            await setSyncAnchor(syncScope, {
+              latestMailId: result.latestMailId,
+              latestCreatedAt: result.latestCreatedAt,
+              totalFetched: anchor.totalFetched + result.newMails.length,
+            });
+          }
+        } else {
+          const rawMails = await fetchMailHistory(account.jwt, {
+            pageSize: 100,
+            maxPages: 100,
+            ...apiOptions,
+          });
+          parsed = await parseMailBatch(rawMails);
+          const newAnchor = buildAnchorFromMails(rawMails);
+          if (newAnchor) {
+            await setSyncAnchor(syncScope, newAnchor);
+          }
+        }
+
+        const nextMails = mergeMailLists(mailsRef.current, parsed);
+        mailsRef.current = nextMails;
+        dispatch({ type: "SET_MAILS", payload: nextMails });
+        await writeMailboxCache(cacheInput, nextMails);
+      } catch (err: any) {
+        dispatch({
+          type: "SET_ERROR",
+          payload: err.message || "加载邮件失败",
+        });
+      } finally {
+        dispatch({ type: "SET_LOADING_MAILS", payload: false });
+      }
+    })();
+
+    inboxSyncPromiseRef.current = syncTask;
     try {
-      const apiOptions = await getAccountApiOptions(account);
-      const rawMails = await fetchMailHistory(account.jwt, {
-        pageSize: 100,
-        maxPages: 100,
-        ...apiOptions,
-      });
-      const parsed = await parseMailBatch(rawMails);
-      const nextMails = sortMailsDesc(parsed);
-      dispatch({ type: "SET_MAILS", payload: nextMails });
-      await writeMailboxCache(cacheInput, nextMails);
-    } catch (err: any) {
-      dispatch({
-        type: "SET_ERROR",
-        payload: err.message || "加载邮件失败",
-      });
+      await syncTask;
     } finally {
-      dispatch({ type: "SET_LOADING_MAILS", payload: false });
+      if (inboxSyncPromiseRef.current === syncTask) {
+        inboxSyncPromiseRef.current = null;
+      }
     }
   }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Refresh Mails ──
   const refreshMails = useCallback(async () => {
-    const accounts = await getAccounts();
-    const activeIndex = await getActiveAccountIndex();
-    const account = accounts[activeIndex];
-    if (!account) return;
+    if (inboxSyncPromiseRef.current) {
+      await inboxSyncPromiseRef.current;
+      return;
+    }
 
-    const cacheInput = getMailboxCacheInput(account, "inbox");
-    dispatch({ type: "SET_REFRESHING", payload: true });
+    const syncTask = (async () => {
+      const accounts = await getAccounts();
+      const activeIndex = await getActiveAccountIndex();
+      const normalizedActiveIndex = Number.isFinite(activeIndex) ? activeIndex : 0;
+      const account = accounts[normalizedActiveIndex] || accounts[0];
+      if (!account) return;
+
+      const cacheInput = getMailboxCacheInput(account, "inbox");
+      const syncScope = {
+        workerUrl: cacheInput.workerUrl,
+        address: account.address,
+        box: "inbox" as const,
+      };
+      dispatch({ type: "SET_REFRESHING", payload: true });
+      try {
+        const apiOptions = await getAccountApiOptions(account);
+        let anchor = await getSyncAnchor(syncScope);
+        if (!anchor && mailsRef.current.length > 0) {
+          const cachedAnchor = buildAnchorFromMails(mailsRef.current);
+          if (cachedAnchor) {
+            anchor = cachedAnchor;
+            await setSyncAnchor(syncScope, cachedAnchor);
+          }
+        }
+
+        let parsed: ParsedMail[];
+        if (anchor) {
+          const result = await fetchMailsSince(
+            account.jwt,
+            anchor.latestMailId,
+            apiOptions
+          );
+          parsed = await parseMailBatch(result.newMails);
+          if (result.newMails.length > 0 && !result.hasMore) {
+            await setSyncAnchor(syncScope, {
+              latestMailId: result.latestMailId,
+              latestCreatedAt: result.latestCreatedAt,
+              totalFetched: anchor.totalFetched + result.newMails.length,
+            });
+          }
+        } else {
+          const rawMails = await fetchMailHistory(account.jwt, {
+            pageSize: 100,
+            maxPages: 100,
+            ...apiOptions,
+          });
+          parsed = await parseMailBatch(rawMails);
+          const newAnchor = buildAnchorFromMails(rawMails);
+          if (newAnchor) {
+            await setSyncAnchor(syncScope, newAnchor);
+          }
+        }
+
+        const nextMails = mergeMailLists(mailsRef.current, parsed);
+        mailsRef.current = nextMails;
+        dispatch({ type: "SET_MAILS", payload: nextMails });
+        await writeMailboxCache(cacheInput, nextMails);
+      } catch {
+        // Silently fail on auto-refresh
+      } finally {
+        dispatch({ type: "SET_REFRESHING", payload: false });
+      }
+    })();
+
+    inboxSyncPromiseRef.current = syncTask;
     try {
-      const apiOptions = await getAccountApiOptions(account);
-      const { results } = await fetchMails(account.jwt, 100, 0, apiOptions);
-      const parsed = await parseMailBatch(results);
-      const nextMails = mergeMailLists(mailsRef.current, parsed);
-      dispatch({
-        type: "SET_MAILS",
-        payload: nextMails,
-      });
-      await writeMailboxCache(cacheInput, nextMails);
-    } catch {
-      // Silently fail on auto-refresh
+      await syncTask;
     } finally {
-      dispatch({ type: "SET_REFRESHING", payload: false });
+      if (inboxSyncPromiseRef.current === syncTask) {
+        inboxSyncPromiseRef.current = null;
+      }
     }
   }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Load Sent Mails ──
   const loadSentMails = useCallback(async () => {
-    const accounts = await getAccounts();
-    const activeIndex = await getActiveAccountIndex();
-    const account = accounts[activeIndex];
-    if (!account) return;
-
-    const cacheInput = getMailboxCacheInput(account, "sent");
-    const cached = await readMailboxCache(cacheInput);
-    if (cached.length > 0) {
-      dispatch({ type: "SET_SENT_MAILS", payload: sortMailsDesc(cached) });
+    if (sentSyncPromiseRef.current) {
+      await sentSyncPromiseRef.current;
+      return;
     }
 
-    dispatch({ type: "SET_LOADING_SENT", payload: true });
+    const syncTask = (async () => {
+      const accounts = await getAccounts();
+      const activeIndex = await getActiveAccountIndex();
+      const normalizedActiveIndex = Number.isFinite(activeIndex) ? activeIndex : 0;
+      const account = accounts[normalizedActiveIndex] || accounts[0];
+      if (!account) return;
+
+      const cacheInput = getMailboxCacheInput(account, "sent");
+      const syncScope = {
+        workerUrl: cacheInput.workerUrl,
+        address: account.address,
+        box: "sent" as const,
+      };
+      const cached = await readMailboxCache(cacheInput);
+      if (cached.length > 0) {
+        const cachedMails = sortMailsDesc(cached);
+        sentMailsRef.current = cachedMails;
+        dispatch({ type: "SET_SENT_MAILS", payload: cachedMails });
+      }
+
+      dispatch({ type: "SET_LOADING_SENT", payload: true });
+      try {
+        const apiOptions = await getAccountApiOptions(account);
+        let anchor = await getSyncAnchor(syncScope);
+        if (!anchor && sentMailsRef.current.length > 0) {
+          const cachedAnchor = buildAnchorFromMails(sentMailsRef.current);
+          if (cachedAnchor) {
+            anchor = cachedAnchor;
+            await setSyncAnchor(syncScope, cachedAnchor);
+          }
+        }
+
+        let parsed: ParsedMail[];
+        if (anchor) {
+          const result = await fetchSentMailsSince(
+            account.jwt,
+            anchor.latestMailId,
+            apiOptions
+          );
+          parsed = await parseMailBatch(result.newMails);
+          if (result.newMails.length > 0 && !result.hasMore) {
+            await setSyncAnchor(syncScope, {
+              latestMailId: result.latestMailId,
+              latestCreatedAt: result.latestCreatedAt,
+              totalFetched: anchor.totalFetched + result.newMails.length,
+            });
+          }
+        } else {
+          const rawMails = await fetchSentMailHistory(account.jwt, {
+            pageSize: 100,
+            maxPages: 100,
+            ...apiOptions,
+          });
+          parsed = await parseMailBatch(rawMails);
+          const newAnchor = buildAnchorFromMails(rawMails);
+          if (newAnchor) {
+            await setSyncAnchor(syncScope, newAnchor);
+          }
+        }
+
+        const nextMails = mergeMailLists(sentMailsRef.current, parsed);
+        sentMailsRef.current = nextMails;
+        dispatch({ type: "SET_SENT_MAILS", payload: nextMails });
+        await writeMailboxCache(cacheInput, nextMails);
+      } catch (err: any) {
+        dispatch({
+          type: "SET_ERROR",
+          payload: err.message || "加载发件箱失败",
+        });
+      } finally {
+        dispatch({ type: "SET_LOADING_SENT", payload: false });
+      }
+    })();
+
+    sentSyncPromiseRef.current = syncTask;
     try {
-      const apiOptions = await getAccountApiOptions(account);
-      const rawMails = await fetchSentMailHistory(account.jwt, {
-        pageSize: 100,
-        maxPages: 50,
-        ...apiOptions,
-      });
-      const parsed = await parseMailBatch(rawMails);
-      const nextMails = sortMailsDesc(parsed);
-      dispatch({ type: "SET_SENT_MAILS", payload: nextMails });
-      await writeMailboxCache(cacheInput, nextMails);
-    } catch (err: any) {
-      dispatch({
-        type: "SET_ERROR",
-        payload: err.message || "加载发件箱失败",
-      });
+      await syncTask;
     } finally {
-      dispatch({ type: "SET_LOADING_SENT", payload: false });
+      if (sentSyncPromiseRef.current === syncTask) {
+        sentSyncPromiseRef.current = null;
+      }
     }
   }, [getAccountApiOptions, getMailboxCacheInput]);
 
   // ── Refresh Sent Mails ──
   const refreshSentMails = useCallback(async () => {
-    const accounts = await getAccounts();
-    const activeIndex = await getActiveAccountIndex();
-    const account = accounts[activeIndex];
-    if (!account) return;
+    if (sentSyncPromiseRef.current) {
+      await sentSyncPromiseRef.current;
+      return;
+    }
 
-    const cacheInput = getMailboxCacheInput(account, "sent");
-    dispatch({ type: "SET_LOADING_SENT", payload: true });
+    const syncTask = (async () => {
+      const accounts = await getAccounts();
+      const activeIndex = await getActiveAccountIndex();
+      const normalizedActiveIndex = Number.isFinite(activeIndex) ? activeIndex : 0;
+      const account = accounts[normalizedActiveIndex] || accounts[0];
+      if (!account) return;
+
+      const cacheInput = getMailboxCacheInput(account, "sent");
+      const syncScope = {
+        workerUrl: cacheInput.workerUrl,
+        address: account.address,
+        box: "sent" as const,
+      };
+      dispatch({ type: "SET_LOADING_SENT", payload: true });
+      try {
+        const apiOptions = await getAccountApiOptions(account);
+        let anchor = await getSyncAnchor(syncScope);
+        if (!anchor && sentMailsRef.current.length > 0) {
+          const cachedAnchor = buildAnchorFromMails(sentMailsRef.current);
+          if (cachedAnchor) {
+            anchor = cachedAnchor;
+            await setSyncAnchor(syncScope, cachedAnchor);
+          }
+        }
+
+        let parsed: ParsedMail[];
+        if (anchor) {
+          const result = await fetchSentMailsSince(
+            account.jwt,
+            anchor.latestMailId,
+            apiOptions
+          );
+          parsed = await parseMailBatch(result.newMails);
+          if (result.newMails.length > 0 && !result.hasMore) {
+            await setSyncAnchor(syncScope, {
+              latestMailId: result.latestMailId,
+              latestCreatedAt: result.latestCreatedAt,
+              totalFetched: anchor.totalFetched + result.newMails.length,
+            });
+          }
+        } else {
+          const rawMails = await fetchSentMailHistory(account.jwt, {
+            pageSize: 100,
+            maxPages: 100,
+            ...apiOptions,
+          });
+          parsed = await parseMailBatch(rawMails);
+          const newAnchor = buildAnchorFromMails(rawMails);
+          if (newAnchor) {
+            await setSyncAnchor(syncScope, newAnchor);
+          }
+        }
+
+        const nextMails = mergeMailLists(sentMailsRef.current, parsed);
+        sentMailsRef.current = nextMails;
+        dispatch({ type: "SET_SENT_MAILS", payload: nextMails });
+        await writeMailboxCache(cacheInput, nextMails);
+      } catch {
+        // Silently fail on incremental refresh
+      } finally {
+        dispatch({ type: "SET_LOADING_SENT", payload: false });
+      }
+    })();
+
+    sentSyncPromiseRef.current = syncTask;
     try {
-      const apiOptions = await getAccountApiOptions(account);
-      const { results } = await fetchSentMails(account.jwt, 100, 0, apiOptions);
-      const parsed = await parseMailBatch(results);
-      const nextMails = mergeMailLists(sentMailsRef.current, parsed);
-      dispatch({
-        type: "SET_SENT_MAILS",
-        payload: nextMails,
-      });
-      await writeMailboxCache(cacheInput, nextMails);
-    } catch {
-      // Silently fail on incremental refresh
+      await syncTask;
     } finally {
-      dispatch({ type: "SET_LOADING_SENT", payload: false });
+      if (sentSyncPromiseRef.current === syncTask) {
+        sentSyncPromiseRef.current = null;
+      }
     }
   }, [getAccountApiOptions, getMailboxCacheInput]);
 
@@ -810,6 +1190,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       const apiOptions = await getAccountApiOptions(account);
       await apiDeleteMail(account.jwt, mailId, apiOptions);
       const nextMails = mailsRef.current.filter((m) => m.id !== mailId);
+      mailsRef.current = nextMails;
       dispatch({
         type: "SET_MAILS",
         payload: nextMails,
@@ -838,6 +1219,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
         const apiOptions = await getAccountApiOptions(account);
         await apiDeleteSentMail(account.jwt, mailId, apiOptions);
         const nextMails = sentMailsRef.current.filter((m) => m.id !== mailId);
+        sentMailsRef.current = nextMails;
         dispatch({
           type: "SET_SENT_MAILS",
           payload: nextMails,
@@ -865,8 +1247,15 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     try {
       const apiOptions = await getAccountApiOptions(account);
       await apiClearInbox(account.jwt, apiOptions);
+      mailsRef.current = [];
       dispatch({ type: "SET_MAILS", payload: [] });
-      await writeMailboxCache(getMailboxCacheInput(account, "inbox"), []);
+      const cacheInput = getMailboxCacheInput(account, "inbox");
+      await writeMailboxCache(cacheInput, []);
+      await clearSyncAnchor({
+        workerUrl: cacheInput.workerUrl,
+        address: account.address,
+        box: "inbox",
+      });
       dispatch({ type: "SET_SUCCESS", payload: "收件箱已清空" });
     } catch (err: any) {
       dispatch({ type: "SET_ERROR", payload: err.message || "清空失败" });
@@ -882,8 +1271,15 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     try {
       const apiOptions = await getAccountApiOptions(account);
       await apiClearSentItems(account.jwt, apiOptions);
+      sentMailsRef.current = [];
       dispatch({ type: "SET_SENT_MAILS", payload: [] });
-      await writeMailboxCache(getMailboxCacheInput(account, "sent"), []);
+      const cacheInput = getMailboxCacheInput(account, "sent");
+      await writeMailboxCache(cacheInput, []);
+      await clearSyncAnchor({
+        workerUrl: cacheInput.workerUrl,
+        address: account.address,
+        box: "sent",
+      });
       dispatch({ type: "SET_SUCCESS", payload: "发件箱已清空" });
     } catch (err: any) {
       dispatch({ type: "SET_ERROR", payload: err.message || "清空失败" });
@@ -1076,7 +1472,16 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     }
     try {
       const trimmedPassword = password.trim();
-      await apiAdminLogin(trimmedPassword);
+      // 给登录加 20 秒兜底超时，避免 settings 保存按钮永远卡在"保存中"。
+      await Promise.race([
+        apiAdminLogin(trimmedPassword),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error("管理员登录超时，请检查 Worker 地址或网络")),
+            20000
+          )
+        ),
+      ]);
       const [latestConfig, workerProfiles, activeWorkerProfileId] = await Promise.all([
         getConfig(),
         getWorkerProfiles(),
@@ -1107,6 +1512,33 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.workerUrl, state.refreshInterval]);
 
+  const enterAdminModeLocally = useCallback(async (password?: string) => {
+    const [latestConfig, workerProfiles, activeWorkerProfileId] = await Promise.all([
+      getConfig(),
+      getWorkerProfiles(),
+      getActiveWorkerProfileId(),
+    ]);
+    const nextAdminPassword = (password || latestConfig.adminPassword || state.adminPassword).trim();
+    if (!latestConfig.workerUrl || !nextAdminPassword) {
+      throw new Error("请先配置 Worker 地址和管理员密码");
+    }
+    dispatch({
+      type: "SET_CONFIG",
+      payload: {
+        workerUrl: latestConfig.workerUrl,
+        adminPassword: nextAdminPassword,
+        sitePassword: latestConfig.sitePassword,
+        refreshInterval: Number.isFinite(latestConfig.refreshInterval)
+          ? latestConfig.refreshInterval
+          : state.refreshInterval,
+        workerProfiles,
+        activeWorkerProfileId,
+      },
+    });
+    dispatch({ type: "SET_ADMIN_MODE", payload: true });
+    dispatch({ type: "SET_SUCCESS", payload: "已进入管理员模式" });
+  }, [state.adminPassword, state.refreshInterval]);
+
   const exitAdminMode = useCallback(() => {
     dispatch({ type: "SET_ADMIN_MODE", payload: false });
     dispatch({ type: "SET_SUCCESS", payload: "已退出管理员模式" });
@@ -1114,24 +1546,59 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
 
   // ── Initialize on mount ──
   useEffect(() => {
-    initialize();
+    let cancelled = false;
+    // 兜底：无论 initialize 内部发生什么，最多 8 秒后强制让应用进入可用状态，
+    // 避免因 storage/IO 卡住导致 splash 永久白屏。
+    const timeoutId = setTimeout(() => {
+      if (cancelled) return;
+      dispatch({
+        type: "INIT",
+        payload: {
+          workerUrl: "",
+          adminPassword: "",
+          sitePassword: "",
+          refreshInterval: 30,
+          isConfigured: false,
+          workerProfiles: [],
+          activeWorkerProfileId: "",
+          accounts: [],
+          activeAccountIndex: 0,
+          mails: [],
+          sentMails: [],
+          isAdminMode: false,
+        },
+      });
+    }, 8000);
+    initialize().finally(() => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    });
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
   }, [initialize]);
 
-  // ── Load site settings after config restore ──
-  useEffect(() => {
-    if (!state.isInitialized || !state.isConfigured) return;
-    loadSettings();
-  }, [state.isInitialized, state.isConfigured, state.workerUrl, loadSettings]);
+  // ── Site settings are loaded lazily by the screen that needs them.
+  // Do not auto-fetch settings during app restore/admin entry: a slow Worker must not block launch.
 
   // ── Load mails after account switch ──
   useEffect(() => {
-    if (!state.isInitialized || !state.isConfigured || !activeAccountIdentity) return;
+    if (
+      !state.isInitialized ||
+      !state.isConfigured ||
+      state.isAdminMode ||
+      !activeAccountIdentity
+    ) {
+      return;
+    }
     loadMails();
     loadUserSettings();
   }, [
     activeAccountIdentity,
     loadMails,
     loadUserSettings,
+    state.isAdminMode,
     state.isConfigured,
     state.isInitialized,
   ]);
@@ -1142,7 +1609,12 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       clearInterval(refreshTimerRef.current);
       refreshTimerRef.current = null;
     }
-    if (state.isConfigured && activeAccountIdentity && state.refreshInterval > 0) {
+    if (
+      state.isConfigured &&
+      !state.isAdminMode &&
+      activeAccountIdentity &&
+      state.refreshInterval > 0
+    ) {
       refreshTimerRef.current = setInterval(() => {
         refreshMails();
       }, state.refreshInterval * 1000);
@@ -1152,6 +1624,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     };
   }, [
     state.isConfigured,
+    state.isAdminMode,
     activeAccountIdentity,
     state.refreshInterval,
     refreshMails,
@@ -1163,18 +1636,18 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
       if (
         nextState !== "active" ||
         !state.isInitialized ||
-        !state.isConfigured
+        !state.isConfigured ||
+        state.isAdminMode
       ) {
         return;
       }
-      loadSettings();
       if (activeAccount) refreshMails();
     });
     return () => subscription.remove();
   }, [
     activeAccount,
-    loadSettings,
     refreshMails,
+    state.isAdminMode,
     state.isConfigured,
     state.isInitialized,
   ]);
@@ -1194,6 +1667,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     initialize,
     updateConfig,
     updateWorkerProfiles,
+    saveWorkerProfilesAndEnterAdminLocally,
     switchWorkerProfile,
     reloadWorkerProfiles,
     loadSettings,
@@ -1215,6 +1689,7 @@ export function MailProvider({ children }: { children: React.ReactNode }) {
     importByPassword,
     changePassword,
     saveAutoReply,
+    enterAdminModeLocally,
     enterAdminMode,
     exitAdminMode,
     clearError,

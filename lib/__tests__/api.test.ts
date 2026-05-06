@@ -10,6 +10,7 @@ import {
   fetchSettings,
   fetchMailHistory,
   fetchMails,
+  fetchMailsSince,
   getAccounts,
   getWorkerProfiles,
   getConfig,
@@ -189,6 +190,7 @@ describe("worker profiles", () => {
         id: "a",
         name: "账号 A",
         workerUrl: "https://worker-a.example.com",
+        frontendUrl: "",
         adminPassword: "pass-a",
         domains: ["1.com", "shared.com"],
         randomSubdomainDomains: ["1.com"],
@@ -198,6 +200,7 @@ describe("worker profiles", () => {
         id: "b",
         name: "账号 B",
         workerUrl: "https://worker-b.example.com",
+        frontendUrl: "",
         adminPassword: "pass-b",
         domains: ["4.com", "shared.com"],
         status: "connected",
@@ -529,6 +532,7 @@ describe("createAddress multi-worker routing", () => {
       })
     );
   });
+
 });
 
 describe("adminLogin", () => {
@@ -737,6 +741,60 @@ describe("fetchMailHistory", () => {
       "/api/mails?limit=2&offset=2"
     );
     expect(mails.map((mail) => mail.id)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("fetchMailsSince", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    global.fetch = vi.fn();
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      if (key === "cloudmail_worker_url") {
+        return Promise.resolve("https://worker.example.com");
+      }
+      return Promise.resolve(null);
+    });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("walks pages until it reaches the old anchor before advancing the anchor", async () => {
+    const page1 = Array.from({ length: 50 }, (_, index) => ({
+      id: 160 - index,
+      source: `m${160 - index}`,
+      created_at: "2026-01-01T00:00:00Z",
+    }));
+    const page2 = Array.from({ length: 50 }, (_, index) => ({
+      id: 110 - index,
+      source: `m${110 - index}`,
+      created_at: "2026-01-01T00:01:00Z",
+    }));
+
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({ results: page1, count: 100 })),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({ results: page2, count: 100 })),
+      });
+
+    const result = await fetchMailsSince("jwt-token", 100);
+
+    expect((global.fetch as any).mock.calls[0][0]).toContain(
+      "/api/mails?limit=50&offset=0"
+    );
+    expect((global.fetch as any).mock.calls[1][0]).toContain(
+      "/api/mails?limit=50&offset=50"
+    );
+    expect(result.newMails).toHaveLength(60);
+    expect(result.latestMailId).toBe(160);
+    expect(result.hasMore).toBe(false);
   });
 });
 

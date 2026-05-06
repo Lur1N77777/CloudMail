@@ -15,6 +15,7 @@ const STORAGE_KEYS = {
 } as const;
 
 const adminLoginStrategyCache = new Map<string, "open_api" | "header">();
+const DEFAULT_API_TIMEOUT_MS = 15_000;
 
 // ─── Types ──────────────────────────────────────────────────────
 export interface MailAccount {
@@ -33,6 +34,7 @@ export interface WorkerProfile {
   id: string;
   name: string;
   workerUrl: string;
+  frontendUrl: string;
   adminPassword: string;
   sitePassword?: string;
   domains: string[];
@@ -42,6 +44,18 @@ export interface WorkerProfile {
   status: WorkerProfileConnectionStatus;
   lastCheckedAt?: string;
   errorMessage?: string;
+}
+
+let runtimeConfigSnapshot: (RuntimeConfigOverride & { refreshInterval?: number }) | null = null;
+
+export function primeRuntimeConfigSnapshot(config: RuntimeConfigOverride & { refreshInterval?: number }) {
+  runtimeConfigSnapshot = {
+    workerUrl: normalizeWorkerUrl(config.workerUrl),
+    adminPassword: config.adminPassword || "",
+    sitePassword: config.sitePassword || "",
+    lang: config.lang || "zh",
+    refreshInterval: config.refreshInterval,
+  };
 }
 
 export interface WorkerDomainEntry {
@@ -147,7 +161,7 @@ export interface CreatedAddress {
   jwt: string;
   address: string;
   address_id?: number;
-  password?: string;
+  password?: string | null;
 }
 
 // ─── Config Helpers ─────────────────────────────────────────────
@@ -199,6 +213,7 @@ function sanitizeWorkerProfile(
     id,
     name: String(value?.name || `账号 ${fallbackIndex + 1}`).trim() || `账号 ${fallbackIndex + 1}`,
     workerUrl,
+    frontendUrl: typeof value?.frontendUrl === "string" ? value.frontendUrl.trim().replace(/\/+$/, "") : "",
     adminPassword: String(value?.adminPassword || ""),
     sitePassword: String(value?.sitePassword || ""),
     domains,
@@ -278,11 +293,19 @@ async function getLegacyConfigValues() {
 
 async function writeActiveProfileCompat(profile: WorkerProfile | null) {
   if (!profile) return;
+  const workerUrl = normalizeWorkerUrl(profile.workerUrl);
   await AsyncStorage.multiSet([
-    [STORAGE_KEYS.WORKER_URL, normalizeWorkerUrl(profile.workerUrl)],
+    [STORAGE_KEYS.WORKER_URL, workerUrl],
     [STORAGE_KEYS.ADMIN_PASSWORD, profile.adminPassword || ""],
     [STORAGE_KEYS.SITE_PASSWORD, profile.sitePassword || ""],
   ]);
+  primeRuntimeConfigSnapshot({
+    ...(runtimeConfigSnapshot || {}),
+    workerUrl,
+    adminPassword: profile.adminPassword || "",
+    sitePassword: profile.sitePassword || "",
+    lang: runtimeConfigSnapshot?.lang || "zh",
+  });
 }
 
 function pickActiveWorkerProfile(
@@ -338,6 +361,7 @@ export async function migrateSingleWorkerConfigToProfiles(): Promise<WorkerProfi
     id: createWorkerProfileId(legacy.workerUrl),
     name: "默认账号",
     workerUrl: legacy.workerUrl,
+    frontendUrl: "",
     adminPassword: legacy.adminPassword,
     sitePassword: legacy.sitePassword,
     domains: [],
@@ -438,7 +462,7 @@ function runtimeConfigFromProfile(
   };
 }
 
-export async function getConfig() {
+async function readStoredConfig() {
   const [legacy, profiles, activeId] = await Promise.all([
     getLegacyConfigValues(),
     getWorkerProfiles(),
@@ -452,6 +476,33 @@ export async function getConfig() {
     refreshInterval: legacy.refreshInterval,
     lang: legacy.lang,
   };
+}
+
+function getRuntimeConfigSnapshot() {
+  if (!runtimeConfigSnapshot?.workerUrl) return null;
+  return {
+    workerUrl: runtimeConfigSnapshot.workerUrl,
+    adminPassword: runtimeConfigSnapshot.adminPassword || "",
+    sitePassword: runtimeConfigSnapshot.sitePassword || "",
+    refreshInterval: Number.isFinite(runtimeConfigSnapshot.refreshInterval)
+      ? Number(runtimeConfigSnapshot.refreshInterval)
+      : 30,
+    lang: runtimeConfigSnapshot.lang || "zh",
+  };
+}
+
+export async function getConfig() {
+  const snapshot = getRuntimeConfigSnapshot();
+  if (!snapshot) {
+    return readStoredConfig();
+  }
+
+  const stored = await Promise.race([
+    readStoredConfig(),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 120)),
+  ]);
+
+  return stored?.workerUrl ? stored : snapshot;
 }
 
 export async function saveConfig(config: {
@@ -475,6 +526,16 @@ export async function saveConfig(config: {
     ]);
   if (config.lang !== undefined) pairs.push([STORAGE_KEYS.LANG, config.lang]);
   if (pairs.length) await AsyncStorage.multiSet(pairs);
+  if (runtimeConfigSnapshot) {
+    primeRuntimeConfigSnapshot({
+      ...runtimeConfigSnapshot,
+      workerUrl: config.workerUrl ?? runtimeConfigSnapshot.workerUrl,
+      adminPassword: config.adminPassword ?? runtimeConfigSnapshot.adminPassword,
+      sitePassword: config.sitePassword ?? runtimeConfigSnapshot.sitePassword,
+      refreshInterval: config.refreshInterval ?? runtimeConfigSnapshot.refreshInterval,
+      lang: config.lang ?? runtimeConfigSnapshot.lang ?? "zh",
+    });
+  }
 
   if (
     config.workerUrl !== undefined ||
@@ -490,6 +551,7 @@ export async function saveConfig(config: {
         id: active?.id || createWorkerProfileId(workerUrl),
         name: active?.name || "默认账号",
         workerUrl,
+        frontendUrl: active?.frontendUrl || "",
         adminPassword: config.adminPassword ?? active?.adminPassword ?? "",
         sitePassword: config.sitePassword ?? active?.sitePassword ?? "",
         domains: active?.domains || [],
@@ -511,9 +573,13 @@ export async function saveConfig(config: {
 
 // ─── Account Helpers ────────────────────────────────────────────
 export async function getAccounts(): Promise<MailAccount[]> {
-  const raw = await AsyncStorage.getItem(STORAGE_KEYS.ACCOUNTS);
-  const parsed = raw ? JSON.parse(raw) : [];
-  return Array.isArray(parsed) ? parsed : [];
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEYS.ACCOUNTS);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function saveAccounts(accounts: MailAccount[]) {
@@ -611,6 +677,7 @@ async function apiRequest<T>(
     adminAuth?: boolean;
     adminPasswordOverride?: string;
     configOverride?: RuntimeConfigOverride;
+    timeoutMs?: number;
   } = {}
 ): Promise<T> {
   const storedConfig = options.configOverride ? null : await getConfig();
@@ -629,7 +696,14 @@ async function apiRequest<T>(
     err.path = path;
     throw err;
   }
-  const { method = "GET", body, jwt, adminAuth, adminPasswordOverride } = options;
+  const {
+    method = "GET",
+    body,
+    jwt,
+    adminAuth,
+    adminPasswordOverride,
+    timeoutMs = DEFAULT_API_TIMEOUT_MS,
+  } = options;
   const headers = buildHeaders({
     config,
     jwt,
@@ -638,18 +712,35 @@ async function apiRequest<T>(
   });
   const url = `${config.workerUrl}${path}`;
 
-  const fetchOptions: RequestInit = { method, headers };
+  const controller =
+    typeof AbortController !== "undefined" ? new AbortController() : null;
+  const fetchOptions: RequestInit = {
+    method,
+    headers,
+    ...(controller ? { signal: controller.signal } : {}),
+  };
   if (body !== undefined && body !== null) {
     fetchOptions.body = JSON.stringify(body);
   }
 
   let response: Response;
+  const timeoutId =
+    controller && timeoutMs > 0
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
   try {
     response = await fetch(url, fetchOptions);
   } catch (err: any) {
-    const wrapped = new Error(err?.message || "网络请求失败") as ApiError;
+    const isAbort =
+      err?.name === "AbortError" ||
+      String(err?.message || "").toLowerCase().includes("aborted");
+    const wrapped = new Error(
+      isAbort ? "网络请求超时，请检查 Worker 地址或网络连接" : err?.message || "网络请求失败"
+    ) as ApiError;
     wrapped.path = path;
     throw wrapped;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
 
   if (!response.ok) {
@@ -814,13 +905,16 @@ export async function changeAddressPassword(
   params: { old_password?: string; password: string },
   options?: ApiRuntimeOptions
 ): Promise<void> {
+  const hashedPassword = sha256Hex(params.password);
   await apiRequest("/api/address_change_password", {
     method: "POST",
     jwt,
     configOverride: resolveWorkerProfileConfigOverride(options),
     body: {
+      new_password: hashedPassword,
+      // Keep the legacy field for compatibility with older custom Workers.
+      password: hashedPassword,
       old_password: params.old_password ? sha256Hex(params.old_password) : "",
-      password: sha256Hex(params.password),
     },
   });
 }
@@ -910,6 +1004,97 @@ export async function fetchSingleMail(
     jwt,
     configOverride: resolveWorkerProfileConfigOverride(options),
   });
+}
+
+// ─── Incremental Fetch ──────────────────────────────────────────
+
+export interface IncrementalMailResult {
+  newMails: RawMail[];
+  latestMailId: number;
+  latestCreatedAt: string;
+  hasMore: boolean;
+  totalCount?: number;
+}
+
+async function fetchMailsSincePaginated(
+  fetchPage: (limit: number, offset: number) => Promise<MailPage>,
+  sinceId: number,
+  options: { pageSize?: number; maxPages?: number } = {}
+): Promise<IncrementalMailResult> {
+  const pageSize = options.pageSize ?? 50;
+  const maxPages = options.maxPages ?? 100;
+  const newMails: RawMail[] = [];
+  const seenNewMailIds = new Set<number>();
+  let latestMailId = sinceId;
+  let latestCreatedAt = "";
+  let offset = 0;
+  let hasMore = false;
+  let totalCount: number | undefined;
+
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+    const page = await fetchPage(pageSize, offset);
+    const results = page.results || [];
+    if (pageIndex === 0 && typeof page.count === "number") {
+      totalCount = page.count;
+    }
+    if (results.length === 0) {
+      hasMore = false;
+      break;
+    }
+
+    for (const mail of results) {
+      if (mail.id > latestMailId) {
+        latestMailId = mail.id;
+        latestCreatedAt = mail.created_at || "";
+      }
+      if (mail.id > sinceId && !seenNewMailIds.has(mail.id)) {
+        seenNewMailIds.add(mail.id);
+        newMails.push(mail);
+      }
+    }
+
+    offset += results.length;
+    const reachedKnownAnchor = results.some((mail) => mail.id <= sinceId);
+    const reachedEnd = results.length < pageSize;
+    if (reachedKnownAnchor || reachedEnd) {
+      hasMore = false;
+      break;
+    }
+
+    hasMore = true;
+  }
+
+  return {
+    newMails,
+    latestMailId,
+    latestCreatedAt,
+    hasMore,
+    totalCount,
+  };
+}
+
+/** Fetch all currently reachable mails with ID > sinceId. */
+export async function fetchMailsSince(
+  jwt: string,
+  sinceId: number,
+  options?: ApiRuntimeOptions
+): Promise<IncrementalMailResult> {
+  return fetchMailsSincePaginated(
+    (limit, offset) => fetchMails(jwt, limit, offset, options),
+    sinceId
+  );
+}
+
+/** Incremental fetch for sent mails. */
+export async function fetchSentMailsSince(
+  jwt: string,
+  sinceId: number,
+  options?: ApiRuntimeOptions
+): Promise<IncrementalMailResult> {
+  return fetchMailsSincePaginated(
+    (limit, offset) => fetchSentMails(jwt, limit, offset, options),
+    sinceId
+  );
 }
 
 function shouldFallbackDeleteRoute(error: unknown): boolean {
@@ -1084,6 +1269,7 @@ export interface AdminAddress {
   send_count?: number;
   created_at?: string;
   updated_at?: string;
+  latest_mail_at?: string;
   user_id?: number | string;
   user_name?: string;
   user_email?: string;
@@ -1444,6 +1630,30 @@ export async function fetchAdminUnknownMails(params: {
     { adminAuth: true }
   );
   return normalizeMailPage(resp);
+}
+
+/** Admin: incremental fetch for inbox mails (only ID > sinceId). */
+export async function fetchAdminMailsSince(params: {
+  address?: string;
+  sinceId: number;
+}): Promise<IncrementalMailResult> {
+  return fetchMailsSincePaginated(
+    (limit, offset) =>
+      fetchAdminMails({ address: params.address, limit, offset }),
+    params.sinceId
+  );
+}
+
+/** Admin: incremental fetch for sent mails (only ID > sinceId). */
+export async function fetchAdminSendboxSince(params: {
+  address?: string;
+  sinceId: number;
+}): Promise<IncrementalMailResult> {
+  return fetchMailsSincePaginated(
+    (limit, offset) =>
+      fetchAdminSendbox({ address: params.address, limit, offset }),
+    params.sinceId
+  );
 }
 
 /** Admin: delete any mail by ID. */

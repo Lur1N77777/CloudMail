@@ -2,6 +2,30 @@
 
 本文件记录 CloudMail 的主要公开版本变化。
 
+## V1.1.2 - 2026-05-07
+
+V1.1.2 是一次稳定性和性能体验版本，重点解决首次保存进入后台卡住、地址页无持久缓存、刷新指示重复和远端删除同步不及时等问题。
+
+### 中文
+
+- 保存 Workers 配置后立即进入管理员后台，管理员校验、统计和预热请求改为后台按需执行。
+- 新增地址页持久化缓存和地址索引缓存，地址、分组、搜索和用户筛选可缓存优先显示。
+- 优化地址和邮件刷新同步，服务端已删除的数据会在刷新时校正，避免旧缓存长期残留。
+- 修复地址删除 / 批量删除后分页 offset 未回退导致列表空白且无法继续加载的问题。
+- 优化收件、发件、未知和单地址邮件列表的缓存、分页和增量刷新链路。
+- 移除顶部重复“更新中”提示，只保留一个刷新指示；下拉刷新圆形背景适配浅色、普通深色和 OLED 黑主题。
+- 统一 Worker 时间解析和上海时间显示，修复列表时间与详情时间不一致的问题。
+
+### English
+
+- Saving Workers configuration now opens the admin console immediately; admin checks, statistics, and warm-up requests run on demand in the background.
+- Added persisted cache for the address list and full address index, making addresses, groups, search, and user filters cache-first.
+- Improved address and mail refresh synchronization so server-side deletions are corrected during mobile refresh.
+- Fixed pagination offset after address delete/batch delete to avoid empty lists that cannot load more data.
+- Improved cache, paging, and incremental refresh for inbox, sent, unknown, and single-address mail lists.
+- Removed duplicate top updating indicators and kept a single refresh spinner; RefreshControl backgrounds now match light, dark, and OLED black themes.
+- Unified Worker timestamp parsing and Shanghai-time display to keep list and detail timestamps consistent.
+
 ## V1.1.1 - 2026-04-30
 
 V1.1.1 是多 Cloudflare 账号 / 多 Worker 支持版本，主要解决多个 Cloudflare 账号分别部署独立 Worker 时，App 只能使用单 Worker 的问题。

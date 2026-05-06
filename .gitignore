@@ -67,6 +67,7 @@ Thumbs.db
 .claude/
 .omx/
 .playwright-mcp/
+.trellis/
 
 # Local Expo/runtime artifacts
 .expo/

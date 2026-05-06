@@ -40,11 +40,16 @@ import {
   adminDeleteSentMail,
   adminSendMail,
   fetchAdminMails,
+  fetchAdminMailsSince,
   fetchAdminSendbox,
+  fetchAdminSendboxSince,
   type ParsedMail,
   type RawMail,
 } from "@/lib/api";
 import { copyTextToClipboard } from "@/lib/clipboard";
+import { readMailboxCache, writeMailboxCache } from "@/lib/mail-cache";
+import { mergeMailLists, sortMailsDesc } from "@/lib/mail-list-utils";
+import { getSyncAnchor, setSyncAnchor, buildAnchorFromMails, clearSyncAnchor } from "@/lib/mail-sync-anchor";
 import { setAdminMailEntry } from "@/lib/admin-mail-store";
 import {
   buildAdminMailReadKey,
@@ -60,7 +65,6 @@ import {
   loadAdminMailSpamSenderSet,
   subscribeAdminMailSpamState,
 } from "@/lib/admin-mail-spam-state";
-import { mergeMailLists } from "@/lib/mail-list-utils";
 import {
   formatMailDate,
   formatMailboxDisplay,
@@ -327,6 +331,16 @@ function AddressMailList({
     [address]
   );
 
+  const cacheKeyInput = useMemo(
+    () => ({ workerUrl: mailState.workerUrl, address, box: kind === "inbox" ? "inbox" as const : "sent" as const }),
+    [mailState.workerUrl, address, kind]
+  );
+
+  const syncAnchorInput = useMemo(
+    () => ({ workerUrl: mailState.workerUrl, address, box: kind === "inbox" ? "inbox" as const : "sent" as const }),
+    [mailState.workerUrl, address, kind]
+  );
+
   useEffect(() => {
     dataRef.current = data;
   }, [data]);
@@ -387,46 +401,97 @@ function AddressMailList({
     };
   }, [kind, readStateScope]);
 
+  const parseRawMails = useCallback(
+    async (results: RawMail[]): Promise<ParsedMail[]> => {
+      return Promise.all(
+        results.map(async (item) => {
+          try {
+            const parsedMail = await parseMail(item);
+            return {
+              ...parsedMail,
+              ownerAddress: item.address || address,
+              mailboxKind: kind === "inbox" ? "inbox" as const : "sendbox" as const,
+            } as ParsedMail;
+          } catch {
+            return {
+              id: item.id,
+              subject: item.subject || "(解析失败)",
+              raw: item.raw || item.source || "",
+              createdAt: item.created_at,
+              ownerAddress: item.address || address,
+              mailboxKind: kind === "inbox" ? "inbox" as const : "sendbox" as const,
+            } as ParsedMail;
+          }
+        })
+      );
+    },
+    [address, kind]
+  );
+
   const load = useCallback(
     async (freshOffset: number = 0) => {
       setIsLoading(true);
       try {
-        const page =
-          kind === "inbox"
-            ? await fetchAdminMails({ address, limit: PAGE_SIZE, offset: freshOffset })
-            : await fetchAdminSendbox({
-                address,
-                limit: PAGE_SIZE,
-                offset: freshOffset,
-              });
+        // --- Cache-first: show cached mails immediately on first load ---
+        if (freshOffset === 0 && dataRef.current.length === 0) {
+          const cached = await readMailboxCache(cacheKeyInput);
+          if (cached.length > 0) {
+            setData(sortMailsDesc(cached));
+          }
+        }
 
-        const parsed = await Promise.all(
-          page.results.map(async (item: RawMail) => {
-            try {
-              const parsedMail = await parseMail(item);
-              return {
-                ...parsedMail,
-                ownerAddress: item.address || address,
-                mailboxKind: kind === "inbox" ? "inbox" : "sendbox",
-              } as ParsedMail;
-            } catch {
-              return {
-                id: item.id,
-                subject: item.subject || "(解析失败)",
-                raw: item.raw || item.source || "",
-                createdAt: item.created_at,
-                ownerAddress: item.address || address,
-                mailboxKind: kind === "inbox" ? "inbox" : "sendbox",
-              } as ParsedMail;
-            }
-          })
-        );
+        // --- Incremental or full fetch ---
+        const anchor = freshOffset === 0
+          ? await getSyncAnchor(syncAnchorInput)
+          : null;
+
+        let parsed: ParsedMail[];
+        let serverCount: number;
+
+        if (anchor && freshOffset === 0) {
+          // Incremental: only fetch mails newer than anchor
+          const result = kind === "inbox"
+            ? await fetchAdminMailsSince({ address, sinceId: anchor.latestMailId })
+            : await fetchAdminSendboxSince({ address, sinceId: anchor.latestMailId });
+
+          parsed = await parseRawMails(result.newMails);
+          serverCount = -1;
+
+          if (result.newMails.length > 0) {
+            await setSyncAnchor(syncAnchorInput, {
+              latestMailId: result.latestMailId,
+              latestCreatedAt: result.latestCreatedAt,
+              totalFetched: anchor.totalFetched + result.newMails.length,
+            });
+          }
+        } else if (freshOffset === 0) {
+          // Cold start: full first page
+          const page = kind === "inbox"
+            ? await fetchAdminMails({ address, limit: PAGE_SIZE, offset: 0 })
+            : await fetchAdminSendbox({ address, limit: PAGE_SIZE, offset: 0 });
+
+          parsed = await parseRawMails(page.results);
+          serverCount = page.count;
+
+          const newAnchor = buildAnchorFromMails(page.results);
+          if (newAnchor) {
+            await setSyncAnchor(syncAnchorInput, newAnchor);
+          }
+        } else {
+          // Pagination: load more
+          const page = kind === "inbox"
+            ? await fetchAdminMails({ address, limit: PAGE_SIZE, offset: freshOffset })
+            : await fetchAdminSendbox({ address, limit: PAGE_SIZE, offset: freshOffset });
+
+          parsed = await parseRawMails(page.results);
+          serverCount = page.count;
+        }
 
         const nextData =
           freshOffset === 0 && dataRef.current.length > 0
             ? mergeMailLists(dataRef.current, parsed)
             : freshOffset === 0
-              ? parsed
+              ? sortMailsDesc(parsed)
               : mergeMailLists(dataRef.current, parsed);
 
         if (kind === "inbox" && readStateScope.trim()) {
@@ -440,19 +505,24 @@ function AddressMailList({
         }
 
         setData(nextData);
-        setCount(page.count);
+        if (serverCount >= 0) {
+          setCount(serverCount);
+        }
         setOffset(
           freshOffset === 0
-            ? Math.max(offsetRef.current, page.results.length)
-            : freshOffset + page.results.length
+            ? Math.max(offsetRef.current, parsed.length)
+            : freshOffset + parsed.length
         );
+
+        // Persist cache
+        await writeMailboxCache(cacheKeyInput, nextData);
       } catch (err: any) {
         Alert.alert("加载失败", err.message || "");
       } finally {
         setIsLoading(false);
       }
     },
-    [address, kind, readStateScope, readStateViewKey]
+    [address, kind, readStateScope, readStateViewKey, cacheKeyInput, syncAnchorInput, parseRawMails]
   );
 
   useEffect(() => {
@@ -530,6 +600,7 @@ function AddressMailList({
           onPress: async () => {
             try {
               await onClear();
+              await clearSyncAnchor(syncAnchorInput);
               setData([]);
               setCount(0);
               setOffset(0);
@@ -541,7 +612,7 @@ function AddressMailList({
         },
       ]
     );
-  }, [address, kind, onClear]);
+  }, [address, kind, onClear, syncAnchorInput]);
 
   const handleCopyCode = useCallback(
     async (mail: ParsedMail, code: string) => {
@@ -673,6 +744,7 @@ function AddressMailList({
           onRefresh={() => load(0)}
           tintColor={colors.primary}
           colors={[colors.primary]}
+          progressBackgroundColor={colors.surface}
         />
       }
       ListHeaderComponent={
@@ -769,7 +841,7 @@ function AddressMailList({
                 </Text>
               </View>
               <Text style={[styles.mailCardDate, { color: colors.muted }]}>
-                {formatMailDate(item.date || item.createdAt)}
+                {formatMailDate(item.createdAt || item.date)}
               </Text>
             </View>
 

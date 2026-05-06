@@ -55,6 +55,7 @@ function createDraftWorkerProfile(index = 1): WorkerProfile {
     id: `draft_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     name: `账号 ${index}`,
     workerUrl: "",
+    frontendUrl: "",
     adminPassword: "",
     sitePassword: "",
     domains: [],
@@ -70,6 +71,7 @@ function normalizeDraftWorkerProfile(profile: WorkerProfile): WorkerProfile {
     ...profile,
     name: profile.name.trim() || "未命名账号",
     workerUrl: profile.workerUrl.trim().replace(/\/+$/, ""),
+    frontendUrl: (profile.frontendUrl || "").trim().replace(/\/+$/, ""),
     adminPassword: profile.adminPassword.trim(),
     sitePassword: (profile.sitePassword || "").trim(),
     domains: Array.isArray(profile.domains) ? profile.domains : [],
@@ -97,12 +99,11 @@ export default function SettingsScreen() {
   const appVersion = Constants.expoConfig?.version ?? "1.0.1";
   const {
     state,
-    updateWorkerProfiles,
-    loadSettings,
+    saveWorkerProfilesAndEnterAdminLocally,
     loadUserSettings,
     changePassword,
     saveAutoReply,
-    enterAdminMode,
+    enterAdminModeLocally,
     clearError,
     clearSuccess,
     activeAccount,
@@ -168,7 +169,7 @@ export default function SettingsScreen() {
     }
     setIsEnteringAdmin(true);
     try {
-      await enterAdminMode(adminPwdInput);
+      await enterAdminModeLocally(adminPwdInput);
       setShowAdminModal(false);
       setAdminPwdInput("");
       router.replace("/admin");
@@ -177,7 +178,7 @@ export default function SettingsScreen() {
     } finally {
       setIsEnteringAdmin(false);
     }
-  }, [adminPwdInput, enterAdminMode, router]);
+  }, [adminPwdInput, enterAdminModeLocally, router]);
 
   useEffect(() => {
     if (!state.adminPassword && !showAdminModal) return;
@@ -311,33 +312,25 @@ export default function SettingsScreen() {
     const nextActiveId =
       cleanedProfiles.find((profile) => profile.id === activeWorkerProfileId)?.id ||
       cleanedProfiles[0].id;
-    const activeProfile = cleanedProfiles.find(
-      (profile) => profile.id === nextActiveId
-    )!;
-
     setIsSaving(true);
     try {
-      await updateWorkerProfiles(cleanedProfiles, nextActiveId, refreshInterval);
-      await enterAdminMode(activeProfile.adminPassword);
-      if (Platform.OS !== "web") {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      }
-      try {
-        await loadSettings();
-      } catch {}
-      router.replace("/admin");
-    } catch {
-      // error already in toast
-    } finally {
+      saveWorkerProfilesAndEnterAdminLocally(cleanedProfiles, nextActiveId, refreshInterval);
       setIsSaving(false);
+      if (Platform.OS !== "web") {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+      setTimeout(() => {
+        router.replace("/admin");
+      }, 0);
+    } catch {
+      setIsSaving(false);
+      // error already in toast
     }
   }, [
     activeWorkerProfileId,
     refreshInterval,
     workerProfiles,
-    updateWorkerProfiles,
-    enterAdminMode,
-    loadSettings,
+    saveWorkerProfilesAndEnterAdminLocally,
     router,
   ]);
 
@@ -626,6 +619,35 @@ export default function SettingsScreen() {
                   autoCapitalize="none"
                   autoCorrect={false}
                 />
+              </View>
+
+              <View style={[styles.fieldGroup, { borderBottomColor: colors.border }]}>
+                <View style={styles.fieldHeader}>
+                  <IconSymbol name="safari" size={18} color={colors.primary} />
+                  <Text style={[styles.fieldLabel, { color: colors.foreground }]}>前端地址</Text>
+                </View>
+                <TextInput
+                  style={[
+                    styles.fieldInput,
+                    {
+                      color: colors.foreground,
+                      borderColor: colors.border,
+                      backgroundColor: colors.background,
+                      opacity: isTesting ? 0.62 : 1,
+                    },
+                  ]}
+                  value={profile.frontendUrl || ""}
+                  editable={!isTesting}
+                  onChangeText={(text) => updateWorkerProfileDraft(profile.id, { frontendUrl: text })}
+                  placeholder="https://your-pages.pages.dev（可选）"
+                  placeholderTextColor={colors.muted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                />
+                <Text style={[styles.fieldHint, { color: colors.muted }]}>
+                  网页版邮箱界面地址，用于生成一键登录链接
+                </Text>
               </View>
 
               <View style={[styles.fieldGroup, { borderBottomColor: colors.border }]}>
