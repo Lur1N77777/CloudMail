@@ -13,6 +13,7 @@ V1.1.2 是一次稳定性和性能体验版本，重点解决首次保存进入�
 - 优化地址和邮件刷新同步，服务端已删除的数据会在刷新时校正，避免旧缓存长期残留。
 - 修复地址删除 / 批量删除后分页 offset 未回退导致列表空白且无法继续加载的问题。
 - 优化收件、发件、未知和单地址邮件列表的缓存、分页和增量刷新链路。
+- 新增 Worker 前端地址配置，用于在地址列表和地址详情中一键复制登录链接。
 - 移除顶部重复“更新中”提示，只保留一个刷新指示；下拉刷新圆形背景适配浅色、普通深色和 OLED 黑主题。
 - 统一 Worker 时间解析和上海时间显示，修复列表时间与详情时间不一致的问题。
 
@@ -23,6 +24,7 @@ V1.1.2 是一次稳定性和性能体验版本，重点解决首次保存进入�
 - Improved address and mail refresh synchronization so server-side deletions are corrected during mobile refresh.
 - Fixed pagination offset after address delete/batch delete to avoid empty lists that cannot load more data.
 - Improved cache, paging, and incremental refresh for inbox, sent, unknown, and single-address mail lists.
+- Added Worker frontend URL configuration for one-tap login-link copying from address lists and address details.
 - Removed duplicate top updating indicators and kept a single refresh spinner; RefreshControl backgrounds now match light, dark, and OLED black themes.
 - Unified Worker timestamp parsing and Shanghai-time display to keep list and detail timestamps consistent.
 

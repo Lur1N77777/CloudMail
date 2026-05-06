@@ -34,6 +34,7 @@ V1.1.2 focuses on first-run reliability, refresh behavior, and large-data admini
 - **Remote deletion sync**: background refresh treats the server's first page as authoritative for the visible window, so addresses and mail deleted from the web admin are corrected on mobile refresh instead of staying in cache forever.
 - **More stable large address sets**: the full address index used by groups/search now has cache support, and pagination offsets are corrected after delete/batch actions to avoid empty locked lists with 800+ addresses.
 - **Mail cache and incremental refresh**: inbox, sent, unknown, and single-address mail lists continue to use cache-first rendering, paged loading, and background incremental updates for faster first paint.
+- **One-tap login links**: Worker profiles can store the web frontend URL, and address lists/details can copy a direct login link for quick browser or device handoff.
 - **Cleaner refresh UI**: duplicate top “updating” indicators were removed. Each page now keeps one pull-to-refresh or footer spinner, with themed RefreshControl backgrounds for dark and OLED black modes.
 - **Time display fix**: Worker timestamps are parsed consistently and displayed in Shanghai time, preventing list timestamps from disagreeing with the detail view.
 
@@ -44,7 +45,7 @@ V1.1.2 focuses on first-run reliability, refresh behavior, and large-data admini
 - **Domain-based routing**: address creation automatically calls the Worker that owns the selected domain, reducing manual switching mistakes.
 - **Admin console**: statistics, addresses, inbox mail, sent mail, unknown-recipient mail, and mail sending in one app.
 - **User-level management**: load admin users and view addresses bound to a selected user.
-- **Address management**: create custom, subdomain, and random-subdomain addresses; view credentials, clear inboxes, and delete addresses.
+- **Address management**: create custom, subdomain, and random-subdomain addresses; view credentials, copy one-tap login links, clear inboxes, and delete addresses.
 - **Batch operations**: process the current filtered address scope with preview/confirmation for destructive actions.
 - **Local grouping**: group mailbox addresses locally and filter address or mail views by group.
 - **Inbox and spam mailbox**: switch between normal inbox and spam inside the inbox page; long-press mail to block or unblock a sender.
@@ -99,6 +100,7 @@ If you have not deployed the backend yet, follow the upstream [cloudflare_temp_e
 
 - Later launches open the admin console automatically if the saved configuration is still valid.
 - Tap **Settings** in the top-right corner of the admin console to edit Worker, password, refresh, and appearance settings.
+- The **frontend URL** in each Worker profile is used to generate one-tap login links; after configuring it, you can copy login links from the address list or address details.
 - Tap the Worker name in the admin header to switch the current management scope.
 - Use the top tabs to move between admin pages.
 - The theme quick toggle remembers your preferred dark variant. If you picked OLED black, switching from light back to dark returns to OLED black.
