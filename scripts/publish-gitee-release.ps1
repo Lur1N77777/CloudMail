@@ -61,6 +61,8 @@ $asset = Resolve-Path -LiteralPath $AssetPath
 $uploadUrl = "$apiBase/$($release.id)/attach_files"
 Write-Host "Uploading asset $asset ..." -ForegroundColor Cyan
 
+Add-Type -AssemblyName System.Net.Http
+
 $client = [System.Net.Http.HttpClient]::new()
 $form = [System.Net.Http.MultipartFormDataContent]::new()
 $stream = [System.IO.File]::OpenRead($asset)
