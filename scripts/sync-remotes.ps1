@@ -24,7 +24,7 @@ function Run(
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $repoRoot
 
-Run git @("rev-parse", "--is-inside-work-tree")
+Run git "rev-parse" "--is-inside-work-tree"
 
 if ($GiteeUrl.Trim()) {
   $hasGitee = $false
@@ -36,9 +36,9 @@ if ($GiteeUrl.Trim()) {
   }
 
   if ($hasGitee) {
-    Run git @("remote", "set-url", "gitee", $GiteeUrl.Trim())
+    Run git "remote" "set-url" "gitee" $GiteeUrl.Trim()
   } else {
-    Run git @("remote", "add", "gitee", $GiteeUrl.Trim())
+    Run git "remote" "add" "gitee" $GiteeUrl.Trim()
   }
 }
 
@@ -51,15 +51,15 @@ if (-not $AllowDirty) {
 }
 
 if (-not $SkipChecks) {
-  Run pnpm @("check")
-  Run pnpm @("test")
+  Run pnpm "check"
+  Run pnpm "test"
 }
 
 Write-Host "`nConfigured remotes:" -ForegroundColor Green
 & git remote -v
 
 if (-not $SkipGithub) {
-  Run git @("push", "origin", $Branch, "--tags")
+  Run git "push" "origin" $Branch "--tags"
 }
 
 if (-not $SkipGitee) {
@@ -74,7 +74,7 @@ if (-not $SkipGitee) {
     throw "Gitee remote is not configured. Use -GiteeUrl `"https://gitee.com/<user>/CloudMail.git`" first."
   }
 
-  Run git @("push", "gitee", $Branch, "--tags")
+  Run git "push" "gitee" $Branch "--tags"
 }
 
 Write-Host "`nDone. Source and tags are synchronized." -ForegroundColor Green
