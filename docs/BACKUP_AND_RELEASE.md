@@ -78,8 +78,39 @@ git push gitee main --tags
 
 1. 在 GitHub Release 创建 `v1.1.2`。
 2. 上传 APK 到 GitHub Release。
-3. 可选：在 Gitee Release 手动上传同一个 APK。
+3. 使用 `scripts/publish-gitee-release.ps1` 在 Gitee Release 上传同一个 APK。
 4. 本地 `releases/` 只保留最近 3 个 APK。
+
+## 在 Gitee 创建发行版并上传 APK
+
+Gitee 的 Release API 不会复用 Git HTTPS 登录状态，需要单独创建 **私人令牌**：
+
+1. 打开 <https://gitee.com/profile/personal_access_tokens>
+2. 创建令牌，至少勾选项目/仓库相关权限。
+3. 在当前 PowerShell 会话中设置临时环境变量：
+
+```powershell
+$env:GITEE_TOKEN="你的 Gitee 私人令牌"
+```
+
+发布当前版本到 Gitee：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/publish-gitee-release.ps1
+```
+
+发布其他版本时指定参数：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/publish-gitee-release.ps1 `
+  -Repo "lurin7/cloud-mail" `
+  -Tag "v1.1.2" `
+  -Title "CloudMail V1.1.2" `
+  -NotesFile "releases/v1.1.2-release-notes.md" `
+  -AssetPath "releases/cloudmail-v1.1.2.apk"
+```
+
+> 注意：Gitee 发行版附件不建议提交到 Git；APK 仍然放在 Release 附件中。
 
 ## 回滚 / Rollback
 
