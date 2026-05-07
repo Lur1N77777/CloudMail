@@ -58,7 +58,8 @@ if (-not $release.id) {
 }
 
 $asset = Resolve-Path -LiteralPath $AssetPath
-$uploadUrl = "$apiBase/$($release.id)/attach_files"
+$encodedToken = [uri]::EscapeDataString($Token)
+$uploadUrl = "$apiBase/$($release.id)/attach_files?access_token=$encodedToken"
 Write-Host "Uploading asset $asset ..." -ForegroundColor Cyan
 
 Add-Type -AssemblyName System.Net.Http
@@ -67,7 +68,6 @@ $client = [System.Net.Http.HttpClient]::new()
 $form = [System.Net.Http.MultipartFormDataContent]::new()
 $stream = [System.IO.File]::OpenRead($asset)
 try {
-  $form.Add([System.Net.Http.StringContent]::new($Token), "access_token")
   $fileContent = [System.Net.Http.StreamContent]::new($stream)
   $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/vnd.android.package-archive")
   $form.Add($fileContent, "file", [System.IO.Path]::GetFileName($asset))
