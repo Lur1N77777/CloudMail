@@ -9,7 +9,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Run($Command, $Arguments) {
+function Run(
+  [string]$Command,
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$Arguments
+) {
   Write-Host "`n> $Command $Arguments" -ForegroundColor Cyan
   & $Command @Arguments
   if ($LASTEXITCODE -ne 0) {
