@@ -184,6 +184,7 @@ cp .env.example .env.local
 ## 项目文档
 
 - [构建与安装指南](./docs/BUILD.md)
+- [备份与双远程发布流程](./docs/BACKUP_AND_RELEASE.md)
 - [更新日志](./docs/CHANGELOG.md)
 - [设计说明](./docs/design.md)
 - [邮箱 API 报告](./docs/mailbox-api-report.md)

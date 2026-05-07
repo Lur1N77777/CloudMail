@@ -184,6 +184,7 @@ The generated APK should be uploaded to GitHub Releases instead of committed to 
 ## Project docs
 
 - [Build and installation guide](./BUILD.md)
+- [Backup and dual-remote release workflow](./BACKUP_AND_RELEASE.md)
 - [Changelog](./CHANGELOG.md)
 - [Design notes](./design.md)
 - [Mailbox API report](./mailbox-api-report.md)
