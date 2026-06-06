@@ -209,3 +209,7 @@ Issues and pull requests are welcome. Keep changes focused, run checks before su
 CloudMail is released under the [MIT License](../LICENSE).
 
 The upstream mailbox system is [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email). Check the upstream repository for its own license and terms.
+
+## Friendly Links
+
+- [LinuxDo Community](https://linux.do/): recognized with appreciation for its support of open-source discussion, developer collaboration, and the Chinese tech community.

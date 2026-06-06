@@ -201,3 +201,8 @@ CloudMail 基于 [dreamhunter2333/cloudflare_temp_email](https://github.com/drea
 ## 许可证
 
 CloudMail 使用 [MIT License](./LICENSE) 开源。请同时查看上游仓库的许可证和使用条款。
+
+## 友链 / Friendly Links
+
+- [LinuxDo 社区](https://linux.do/)：认可并感谢 LinuxDo 社区对开源交流、开发者互助和中文技术社区建设的支持。
+- [LinuxDo Community](https://linux.do/): recognized with appreciation for its support of open-source discussion, developer collaboration, and the Chinese tech community.
