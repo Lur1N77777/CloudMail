@@ -1,4 +1,16 @@
 # Don't upload these to EAS build servers
+.env
+.env.*
+!.env.example
+*.aab
+*.apk
+*.jks
+*.keystore
+*.mobileprovision
+*.p12
+credentials.json
+google-services.json
+GoogleService-Info.plist
 node_modules
 .git
 .android-sdk
@@ -6,6 +18,8 @@ node_modules
 .codex-build-logs
 .expo
 .playwright-mcp
+android
+ios
 frontend
 scripts/extract_endpoints.mjs
 scripts/inspect_bundle.mjs

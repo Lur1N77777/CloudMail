@@ -11,16 +11,19 @@
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "EXPO_NO_DOTENV": "1"
+        "EXPO_NO_DOTENV": "1",
+        "NODE_ENV": "production"
       }
     },
     "production": {
       "android": {
         "buildType": "app-bundle"
       },
+      "distribution": "store",
       "channel": "production",
       "env": {
-        "EXPO_NO_DOTENV": "1"
+        "EXPO_NO_DOTENV": "1",
+        "NODE_ENV": "production"
       }
     }
   },

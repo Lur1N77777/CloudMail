@@ -11,6 +11,7 @@ import {
   Modal,
   ActivityIndicator,
   Pressable,
+  Linking,
 } from "react-native";
 import { useRouter } from "expo-router";
 import Constants from "expo-constants";
@@ -20,6 +21,10 @@ import { Toast } from "@/components/toast";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
 import { useMail } from "@/lib/mail-context";
+import {
+  describeConnectionError,
+  type ConnectionTestStage,
+} from "@/lib/connection-diagnostics";
 import {
   adminLogin as verifyAdminLogin,
   fetchSettings as fetchWorkerSettings,
@@ -43,6 +48,15 @@ const THEME_OPTIONS: { label: string; value: ThemePreference }[] = [
   { label: "深色", value: "dark" },
   { label: "OLED 黑", value: "oled" },
 ];
+
+const PRIVACY_POLICY_URL = String(
+  Constants.expoConfig?.extra?.privacyPolicyUrl ||
+    "https://github.com/Lur1N77777/CloudMail/blob/main/docs/PRIVACY.md"
+);
+const TERMS_OF_SERVICE_URL = String(
+  Constants.expoConfig?.extra?.termsOfServiceUrl ||
+    "https://github.com/Lur1N77777/CloudMail/blob/main/docs/TERMS.md"
+);
 
 function getThemeLabel(scheme: ThemePreference) {
   if (scheme === "system") return "系统";
@@ -161,6 +175,14 @@ export default function SettingsScreen() {
       setShowAdminModal(true);
     }
   }, [state.adminPassword]);
+
+  const handleOpenLegalDocument = useCallback(async (url: string, title: string) => {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert("无法打开链接", `请稍后重试或前往项目仓库查看${title}`);
+    }
+  }, []);
 
   const handleEnterAdmin = useCallback(async () => {
     if (!adminPwdInput.trim()) {
@@ -348,6 +370,7 @@ export default function SettingsScreen() {
       return;
     }
     setTestingProfileId(profileId);
+    let testStage: ConnectionTestStage = "settings";
     try {
       const configOverride = {
         workerUrl: draft.workerUrl,
@@ -356,6 +379,7 @@ export default function SettingsScreen() {
         lang: "zh",
       };
       const settings = await fetchWorkerSettings({ configOverride });
+      testStage = "admin";
       await verifyAdminLogin(draft.adminPassword, { configOverride });
       const domainCount = settings.domains?.length || 0;
       const checkedProfile: Partial<WorkerProfile> = {
@@ -388,14 +412,15 @@ export default function SettingsScreen() {
       if (!latest || getWorkerProfileTestFingerprint(latest) !== testFingerprint) {
         return;
       }
+      const diagnostic = describeConnectionError(err, testStage);
       updateWorkerProfileDraft(profileId, {
         status: "error",
         lastCheckedAt: new Date().toISOString(),
-        errorMessage: err.message || "无法连接",
+        errorMessage: `${diagnostic.title}：${diagnostic.message}`,
       });
       Alert.alert(
-        "连接失败",
-        `${err.message || "无法连接"}\n\n请检查:\n1. Worker 地址是否正确\n2. 是否需要站点密码\n3. 管理员密码是否正确`
+        diagnostic.title,
+        `${diagnostic.message}\n\n${diagnostic.suggestion}`
       );
     } finally {
       setTestingProfileId(null);
@@ -1188,6 +1213,45 @@ export default function SettingsScreen() {
               </Text>
             </View>
           </Pressable>
+          <View style={[styles.legalLinks, { borderTopColor: colors.border }]}>
+            <Pressable
+              accessibilityRole="link"
+              onPress={() =>
+                void handleOpenLegalDocument(PRIVACY_POLICY_URL, "隐私政策")
+              }
+              style={({ pressed }) => [
+                styles.legalLink,
+                styles.legalLinkDivider,
+                { borderBottomColor: colors.border, opacity: pressed ? 0.6 : 1 },
+              ]}
+            >
+              <View style={styles.legalLinkLabel}>
+                <IconSymbol name="lock.fill" size={18} color={colors.muted} />
+                <Text style={[styles.legalLinkText, { color: colors.foreground }]}>
+                  隐私政策
+                </Text>
+              </View>
+              <IconSymbol name="chevron.right" size={20} color={colors.muted} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="link"
+              onPress={() =>
+                void handleOpenLegalDocument(TERMS_OF_SERVICE_URL, "使用条款")
+              }
+              style={({ pressed }) => [
+                styles.legalLink,
+                { opacity: pressed ? 0.6 : 1 },
+              ]}
+            >
+              <View style={styles.legalLinkLabel}>
+                <IconSymbol name="info.circle.fill" size={18} color={colors.muted} />
+                <Text style={[styles.legalLinkText, { color: colors.foreground }]}>
+                  使用条款
+                </Text>
+              </View>
+              <IconSymbol name="chevron.right" size={20} color={colors.muted} />
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.bottomSpacer} />
@@ -1528,6 +1592,28 @@ const styles = StyleSheet.create({
     marginTop: 8,
     textAlign: "center",
     lineHeight: 18,
+  },
+  legalLinks: {
+    borderTopWidth: 0.5,
+  },
+  legalLink: {
+    minHeight: 48,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  legalLinkDivider: {
+    borderBottomWidth: 0.5,
+  },
+  legalLinkLabel: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  legalLinkText: {
+    fontSize: 14,
+    fontWeight: "600",
   },
   bottomSpacer: { height: 40 },
   collapseHeader: {

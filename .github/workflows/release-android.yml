@@ -1,0 +1,62 @@
+name: Android production artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: EAS build profile
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+          - apk
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-production-artifact
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: EAS ${{ inputs.profile }} build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: 21.0.1
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release gates
+        run: |
+          pnpm check
+          pnpm test
+          pnpm lint
+
+      - name: Build signed artifact on EAS
+        env:
+          EXPO_NO_DOTENV: "1"
+          NODE_ENV: production
+        run: eas build --platform android --profile "${{ inputs.profile }}" --non-interactive --wait

@@ -1,5 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { sha256Hex } from "./sha256";
+import {
+  accountCredentialKey,
+  deleteSecureCredential,
+  legacyConfigCredentialKey,
+  readSecureCredential,
+  secureCredentialsAvailable,
+  workerCredentialKey,
+  writeSecureCredential,
+} from "./secure-credentials";
 
 // ─── Storage Keys ───────────────────────────────────────────────
 const STORAGE_KEYS = {
@@ -250,27 +259,137 @@ function dedupeWorkerProfiles(profiles: WorkerProfile[]) {
   return next;
 }
 
+function workerProfileMetadata(profile: WorkerProfile) {
+  const metadata = { ...profile } as Record<string, unknown>;
+  delete metadata.adminPassword;
+  delete metadata.sitePassword;
+  return metadata;
+}
+
+function rawWorkerProfileFor(
+  rawProfiles: unknown[],
+  profile: WorkerProfile
+): Record<string, unknown> | null {
+  return (
+    rawProfiles.find((candidate) => {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return false;
+      }
+      const record = candidate as Record<string, unknown>;
+      return (
+        String(record.id || "").trim() === profile.id ||
+        normalizeWorkerUrl(String(record.workerUrl || "")).toLowerCase() ===
+          profile.workerUrl.toLowerCase()
+      );
+    }) as Record<string, unknown> | undefined
+  ) || null;
+}
+
+async function hydrateSecureWorkerProfiles(
+  profiles: WorkerProfile[],
+  rawProfiles: unknown[]
+) {
+  const resolvedProfiles = await Promise.all(
+    profiles.map(async (profile) => {
+      const rawProfile = rawWorkerProfileFor(rawProfiles, profile);
+      const hasPlaintextAdmin = !!rawProfile && Object.hasOwn(rawProfile, "adminPassword");
+      const hasPlaintextSite = !!rawProfile && Object.hasOwn(rawProfile, "sitePassword");
+      const adminKey = workerCredentialKey(profile.id, "admin");
+      const siteKey = workerCredentialKey(profile.id, "site");
+      const [storedAdminPassword, storedSitePassword] = await Promise.all([
+        readSecureCredential(adminKey),
+        readSecureCredential(siteKey),
+      ]);
+      const adminPassword = hasPlaintextAdmin
+        ? String(rawProfile?.adminPassword || "")
+        : storedAdminPassword || "";
+      const sitePassword = hasPlaintextSite
+        ? String(rawProfile?.sitePassword || "")
+        : storedSitePassword || "";
+
+      return {
+        profile: { ...profile, adminPassword, sitePassword },
+        adminKey,
+        siteKey,
+        hasPlaintextAdmin,
+        hasPlaintextSite,
+      };
+    })
+  );
+  const migrationWrites: Promise<void>[] = [];
+  for (const resolved of resolvedProfiles) {
+    if (resolved.hasPlaintextAdmin) {
+      migrationWrites.push(
+        writeSecureCredential(resolved.adminKey, resolved.profile.adminPassword)
+      );
+    }
+    if (resolved.hasPlaintextSite) {
+      migrationWrites.push(
+        writeSecureCredential(resolved.siteKey, resolved.profile.sitePassword || "")
+      );
+    }
+  }
+  await Promise.all(migrationWrites);
+
+  const hydrated = resolvedProfiles.map((resolved) => resolved.profile);
+  const containsPlaintextCredentials = resolvedProfiles.some(
+    (resolved) => resolved.hasPlaintextAdmin || resolved.hasPlaintextSite
+  );
+
+  if (containsPlaintextCredentials) {
+    await AsyncStorage.setItem(
+      STORAGE_KEYS.WORKER_PROFILES,
+      JSON.stringify(hydrated.map(workerProfileMetadata))
+    );
+  }
+  return hydrated;
+}
+
 async function readWorkerProfilesRaw() {
   const raw = await AsyncStorage.getItem(STORAGE_KEYS.WORKER_PROFILES);
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return dedupeWorkerProfiles(
+    const profiles = dedupeWorkerProfiles(
       parsed
         .map((item, index) => sanitizeWorkerProfile(item, index))
         .filter(Boolean) as WorkerProfile[]
     );
+    if (!(await secureCredentialsAvailable())) return profiles;
+    try {
+      return await hydrateSecureWorkerProfiles(profiles, parsed);
+    } catch {
+      // Keep the legacy plaintext source intact until every secure write succeeds.
+      return profiles;
+    }
   } catch {
     return [];
   }
 }
 
 async function writeWorkerProfilesRaw(profiles: WorkerProfile[]) {
-  await AsyncStorage.setItem(
-    STORAGE_KEYS.WORKER_PROFILES,
-    JSON.stringify(dedupeWorkerProfiles(profiles))
-  );
+  const nextProfiles = dedupeWorkerProfiles(profiles);
+  if (await secureCredentialsAvailable()) {
+    await Promise.all(
+      nextProfiles.flatMap((profile) => [
+        writeSecureCredential(
+          workerCredentialKey(profile.id, "admin"),
+          profile.adminPassword || ""
+        ),
+        writeSecureCredential(
+          workerCredentialKey(profile.id, "site"),
+          profile.sitePassword || ""
+        ),
+      ])
+    );
+    await AsyncStorage.setItem(
+      STORAGE_KEYS.WORKER_PROFILES,
+      JSON.stringify(nextProfiles.map(workerProfileMetadata))
+    );
+    return;
+  }
+  await AsyncStorage.setItem(STORAGE_KEYS.WORKER_PROFILES, JSON.stringify(nextProfiles));
 }
 
 async function getLegacyConfigValues() {
@@ -282,23 +401,80 @@ async function getLegacyConfigValues() {
       AsyncStorage.getItem(STORAGE_KEYS.REFRESH_INTERVAL),
       AsyncStorage.getItem(STORAGE_KEYS.LANG),
     ]);
-  return {
+  const fallback = {
     workerUrl: normalizeWorkerUrl(workerUrl || ""),
     adminPassword: adminPassword || "",
     sitePassword: sitePassword || "",
     refreshInterval: refreshInterval ? parseInt(refreshInterval, 10) : 30,
     lang: lang || "zh",
   };
+  if (!(await secureCredentialsAvailable())) return fallback;
+
+  try {
+    const adminKey = legacyConfigCredentialKey("admin");
+    const siteKey = legacyConfigCredentialKey("site");
+    const [storedAdminPassword, storedSitePassword] = await Promise.all([
+      readSecureCredential(adminKey),
+      readSecureCredential(siteKey),
+    ]);
+    const hasPlaintextAdmin = adminPassword !== null;
+    const hasPlaintextSite = sitePassword !== null;
+    const resolvedAdminPassword = hasPlaintextAdmin
+      ? adminPassword || ""
+      : storedAdminPassword || "";
+    const resolvedSitePassword = hasPlaintextSite
+      ? sitePassword || ""
+      : storedSitePassword || "";
+
+    if (hasPlaintextAdmin) {
+      await writeSecureCredential(adminKey, resolvedAdminPassword);
+    }
+    if (hasPlaintextSite) {
+      await writeSecureCredential(siteKey, resolvedSitePassword);
+    }
+    const plaintextKeys = [
+      ...(hasPlaintextAdmin ? [STORAGE_KEYS.ADMIN_PASSWORD] : []),
+      ...(hasPlaintextSite ? [STORAGE_KEYS.SITE_PASSWORD] : []),
+    ];
+    if (plaintextKeys.length) {
+      await AsyncStorage.multiRemove(plaintextKeys).catch(() => undefined);
+    }
+    return {
+      ...fallback,
+      adminPassword: resolvedAdminPassword,
+      sitePassword: resolvedSitePassword,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 async function writeActiveProfileCompat(profile: WorkerProfile | null) {
   if (!profile) return;
   const workerUrl = normalizeWorkerUrl(profile.workerUrl);
-  await AsyncStorage.multiSet([
-    [STORAGE_KEYS.WORKER_URL, workerUrl],
-    [STORAGE_KEYS.ADMIN_PASSWORD, profile.adminPassword || ""],
-    [STORAGE_KEYS.SITE_PASSWORD, profile.sitePassword || ""],
-  ]);
+  if (await secureCredentialsAvailable()) {
+    await Promise.all([
+      writeSecureCredential(
+        legacyConfigCredentialKey("admin"),
+        profile.adminPassword || ""
+      ),
+      writeSecureCredential(
+        legacyConfigCredentialKey("site"),
+        profile.sitePassword || ""
+      ),
+    ]);
+    await AsyncStorage.multiSet([[STORAGE_KEYS.WORKER_URL, workerUrl]]);
+    await AsyncStorage.multiRemove([
+      STORAGE_KEYS.ADMIN_PASSWORD,
+      STORAGE_KEYS.SITE_PASSWORD,
+    ]).catch(() => undefined);
+  } else {
+    await AsyncStorage.multiSet([
+      [STORAGE_KEYS.WORKER_URL, workerUrl],
+      [STORAGE_KEYS.ADMIN_PASSWORD, profile.adminPassword || ""],
+      [STORAGE_KEYS.SITE_PASSWORD, profile.sitePassword || ""],
+    ]);
+  }
   primeRuntimeConfigSnapshot({
     ...(runtimeConfigSnapshot || {}),
     workerUrl,
@@ -378,6 +554,7 @@ export async function getWorkerProfiles(): Promise<WorkerProfile[]> {
 }
 
 export async function saveWorkerProfiles(profiles: WorkerProfile[]) {
+  const previousProfiles = await readWorkerProfilesRaw();
   const nextProfiles = dedupeWorkerProfiles(profiles);
   await writeWorkerProfilesRaw(nextProfiles);
   const activeId = await AsyncStorage.getItem(STORAGE_KEYS.ACTIVE_WORKER_PROFILE_ID);
@@ -385,6 +562,18 @@ export async function saveWorkerProfiles(profiles: WorkerProfile[]) {
   if (active) {
     await AsyncStorage.setItem(STORAGE_KEYS.ACTIVE_WORKER_PROFILE_ID, active.id);
     await writeActiveProfileCompat(active);
+  }
+  if (await secureCredentialsAvailable()) {
+    const nextIds = new Set(nextProfiles.map((profile) => profile.id));
+    const removedProfiles = previousProfiles.filter(
+      (profile) => !nextIds.has(profile.id)
+    );
+    await Promise.all(
+      removedProfiles.flatMap((profile) => [
+        deleteSecureCredential(workerCredentialKey(profile.id, "admin")),
+        deleteSecureCredential(workerCredentialKey(profile.id, "site")),
+      ])
+    ).catch(() => undefined);
   }
   return nextProfiles;
 }
@@ -513,12 +702,29 @@ export async function saveConfig(config: {
   lang?: string;
 }) {
   const pairs: [string, string][] = [];
+  const useSecureCredentials = await secureCredentialsAvailable();
   if (config.workerUrl !== undefined)
     pairs.push([STORAGE_KEYS.WORKER_URL, normalizeWorkerUrl(config.workerUrl)]);
-  if (config.adminPassword !== undefined)
-    pairs.push([STORAGE_KEYS.ADMIN_PASSWORD, config.adminPassword]);
-  if (config.sitePassword !== undefined)
-    pairs.push([STORAGE_KEYS.SITE_PASSWORD, config.sitePassword]);
+  if (config.adminPassword !== undefined) {
+    if (useSecureCredentials) {
+      await writeSecureCredential(
+        legacyConfigCredentialKey("admin"),
+        config.adminPassword
+      );
+    } else {
+      pairs.push([STORAGE_KEYS.ADMIN_PASSWORD, config.adminPassword]);
+    }
+  }
+  if (config.sitePassword !== undefined) {
+    if (useSecureCredentials) {
+      await writeSecureCredential(
+        legacyConfigCredentialKey("site"),
+        config.sitePassword
+      );
+    } else {
+      pairs.push([STORAGE_KEYS.SITE_PASSWORD, config.sitePassword]);
+    }
+  }
   if (config.refreshInterval !== undefined)
     pairs.push([
       STORAGE_KEYS.REFRESH_INTERVAL,
@@ -526,6 +732,15 @@ export async function saveConfig(config: {
     ]);
   if (config.lang !== undefined) pairs.push([STORAGE_KEYS.LANG, config.lang]);
   if (pairs.length) await AsyncStorage.multiSet(pairs);
+  if (useSecureCredentials) {
+    const plaintextKeys = [
+      ...(config.adminPassword !== undefined ? [STORAGE_KEYS.ADMIN_PASSWORD] : []),
+      ...(config.sitePassword !== undefined ? [STORAGE_KEYS.SITE_PASSWORD] : []),
+    ];
+    if (plaintextKeys.length) {
+      await AsyncStorage.multiRemove(plaintextKeys).catch(() => undefined);
+    }
+  }
   if (runtimeConfigSnapshot) {
     primeRuntimeConfigSnapshot({
       ...runtimeConfigSnapshot,
@@ -572,17 +787,115 @@ export async function saveConfig(config: {
 }
 
 // ─── Account Helpers ────────────────────────────────────────────
+function mailAccountMetadata(account: MailAccount) {
+  const metadata = { ...account } as Record<string, unknown>;
+  delete metadata.jwt;
+  delete metadata.password;
+  return metadata;
+}
+
+async function hydrateSecureAccounts(accounts: MailAccount[]) {
+  const resolvedAccounts = await Promise.all(
+    accounts.map(async (account) => {
+      const identity = buildMailAccountIdentityKey(account);
+      const jwtKey = accountCredentialKey(identity, "jwt");
+      const passwordKey = accountCredentialKey(identity, "password");
+      const hasPlaintextJwt = Object.hasOwn(account, "jwt");
+      const hasPlaintextPassword = Object.hasOwn(account, "password");
+      const [storedJwt, storedPassword] = await Promise.all([
+        readSecureCredential(jwtKey),
+        readSecureCredential(passwordKey),
+      ]);
+      const jwt = hasPlaintextJwt ? String(account.jwt || "") : storedJwt || "";
+      const password = hasPlaintextPassword
+        ? String(account.password || "")
+        : storedPassword || undefined;
+
+      return {
+        account: { ...account, jwt, password },
+        jwtKey,
+        passwordKey,
+        hasPlaintextJwt,
+        hasPlaintextPassword,
+      };
+    })
+  );
+  const migrationWrites: Promise<void>[] = [];
+  for (const resolved of resolvedAccounts) {
+    if (resolved.hasPlaintextJwt) {
+      migrationWrites.push(
+        writeSecureCredential(resolved.jwtKey, resolved.account.jwt)
+      );
+    }
+    if (resolved.hasPlaintextPassword) {
+      migrationWrites.push(
+        writeSecureCredential(
+          resolved.passwordKey,
+          resolved.account.password || ""
+        )
+      );
+    }
+  }
+  await Promise.all(migrationWrites);
+
+  const hydrated = resolvedAccounts.map((resolved) => resolved.account);
+  const containsPlaintextCredentials = resolvedAccounts.some(
+    (resolved) => resolved.hasPlaintextJwt || resolved.hasPlaintextPassword
+  );
+
+  if (containsPlaintextCredentials) {
+    await AsyncStorage.setItem(
+      STORAGE_KEYS.ACCOUNTS,
+      JSON.stringify(hydrated.map(mailAccountMetadata))
+    );
+  }
+  return hydrated;
+}
+
 export async function getAccounts(): Promise<MailAccount[]> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEYS.ACCOUNTS);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    const accounts = parsed.filter(
+      (account): account is MailAccount =>
+        !!account && typeof account === "object" && !Array.isArray(account)
+    );
+    if (!(await secureCredentialsAvailable())) return accounts;
+    try {
+      return await hydrateSecureAccounts(accounts);
+    } catch {
+      // Do not rewrite metadata when any secure read/write fails.
+      return accounts;
+    }
   } catch {
     return [];
   }
 }
 
 export async function saveAccounts(accounts: MailAccount[]) {
+  if (await secureCredentialsAvailable()) {
+    await Promise.all(
+      accounts.flatMap((account) => {
+        const identity = buildMailAccountIdentityKey(account);
+        return [
+          writeSecureCredential(
+            accountCredentialKey(identity, "jwt"),
+            account.jwt || ""
+          ),
+          writeSecureCredential(
+            accountCredentialKey(identity, "password"),
+            account.password || ""
+          ),
+        ];
+      })
+    );
+    await AsyncStorage.setItem(
+      STORAGE_KEYS.ACCOUNTS,
+      JSON.stringify(accounts.map(mailAccountMetadata))
+    );
+    return;
+  }
   await AsyncStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accounts));
 }
 
@@ -626,8 +939,24 @@ export async function addAccount(account: MailAccount) {
 
 export async function removeAccount(index: number) {
   const accounts = await getAccounts();
-  accounts.splice(index, 1);
+  const [removedAccount] = accounts.splice(index, 1);
   await saveAccounts(accounts);
+  const removedIdentity = removedAccount
+    ? buildMailAccountIdentityKey(removedAccount)
+    : "";
+  const identityStillUsed = accounts.some(
+    (account) => buildMailAccountIdentityKey(account) === removedIdentity
+  );
+  if (
+    removedAccount &&
+    !identityStillUsed &&
+    (await secureCredentialsAvailable())
+  ) {
+    await Promise.all([
+      deleteSecureCredential(accountCredentialKey(removedIdentity, "jwt")),
+      deleteSecureCredential(accountCredentialKey(removedIdentity, "password")),
+    ]).catch(() => undefined);
+  }
   const activeIndex = await getActiveAccountIndex();
   if (activeIndex >= accounts.length) {
     await setActiveAccountIndex(Math.max(0, accounts.length - 1));
@@ -1354,6 +1683,18 @@ export interface AdminStatistics {
   [key: string]: unknown;
 }
 
+function selectAdminLoginError(errors: unknown[]) {
+  const withStatus = errors as (Error & { status?: number })[];
+  return (
+    withStatus.find((error) => error?.status === 401 || error?.status === 403) ||
+    withStatus.find(
+      (error) => ![404, 405, 501].includes(Number(error?.status || 0))
+    ) ||
+    withStatus[0] ||
+    new Error("管理员密码校验失败")
+  );
+}
+
 /** Verify admin password. Returns true if accepted. */
 export async function adminLogin(
   password: string,
@@ -1424,7 +1765,7 @@ export async function adminLogin(
       errors.push(error);
       pending -= 1;
       if (pending === 0 && !settled) {
-        reject((errors[0] as Error) || new Error("管理员密码校验失败"));
+        reject(selectAdminLoginError(errors));
       }
     };
 

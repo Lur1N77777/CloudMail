@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
 import {
   addAccount,
   adminLogin,
@@ -14,10 +15,14 @@ import {
   getAccounts,
   getWorkerProfiles,
   getConfig,
+  removeAccount,
+  saveAccounts,
   saveConfig,
+  saveWorkerProfiles,
   setActiveWorkerProfileId,
 } from "../api";
 import { sha256Hex } from "../sha256";
+import { workerCredentialKey } from "../secure-credentials";
 
 // Mock AsyncStorage
 vi.mock("@react-native-async-storage/async-storage", () => ({
@@ -25,8 +30,26 @@ vi.mock("@react-native-async-storage/async-storage", () => ({
     getItem: vi.fn(),
     setItem: vi.fn(),
     multiSet: vi.fn(),
+    removeItem: vi.fn(),
+    multiRemove: vi.fn(),
   },
 }));
+
+vi.mock("expo-secure-store", () => ({
+  isAvailableAsync: vi.fn(),
+  getItemAsync: vi.fn(),
+  setItemAsync: vi.fn(),
+  deleteItemAsync: vi.fn(),
+}));
+
+beforeEach(() => {
+  (SecureStore.isAvailableAsync as any).mockResolvedValue(false);
+  (SecureStore.getItemAsync as any).mockResolvedValue(null);
+  (SecureStore.setItemAsync as any).mockResolvedValue(undefined);
+  (SecureStore.deleteItemAsync as any).mockResolvedValue(undefined);
+  (AsyncStorage.removeItem as any).mockResolvedValue(undefined);
+  (AsyncStorage.multiRemove as any).mockResolvedValue(undefined);
+});
 
 describe("sha256Hex", () => {
   it("matches known SHA-256 vectors", () => {
@@ -214,6 +237,164 @@ describe("worker profiles", () => {
     });
     expect(entries.filter((item) => item.domain === "shared.com").every((item) => item.conflict)).toBe(true);
   });
+
+  it("migrates profile passwords to SecureStore before removing plaintext metadata", async () => {
+    let storedProfiles = JSON.stringify([
+      {
+        id: "worker-a",
+        name: "账号 A",
+        workerUrl: "https://worker-a.example.com",
+        frontendUrl: "",
+        adminPassword: "admin-secret",
+        sitePassword: "site-secret",
+        domains: ["example.com"],
+        status: "connected",
+      },
+    ]);
+    (SecureStore.isAvailableAsync as any).mockResolvedValue(true);
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      if (key === "cloudmail_worker_profiles") return Promise.resolve(storedProfiles);
+      if (key === "cloudmail_active_worker_profile_id") return Promise.resolve("worker-a");
+      return Promise.resolve(null);
+    });
+    (AsyncStorage.setItem as any).mockImplementation((key: string, value: string) => {
+      if (key === "cloudmail_worker_profiles") storedProfiles = value;
+      return Promise.resolve(undefined);
+    });
+
+    const profiles = await getWorkerProfiles();
+
+    expect(profiles[0]).toMatchObject({
+      adminPassword: "admin-secret",
+      sitePassword: "site-secret",
+    });
+    expect(SecureStore.setItemAsync).toHaveBeenCalledWith(
+      expect.stringMatching(/^cloudmail\.secure\.v1\./),
+      "admin-secret"
+    );
+    expect(SecureStore.setItemAsync).toHaveBeenCalledWith(
+      expect.stringMatching(/^cloudmail\.secure\.v1\./),
+      "site-secret"
+    );
+    expect(storedProfiles).not.toContain("admin-secret");
+    expect(storedProfiles).not.toContain("site-secret");
+  });
+
+  it("keeps plaintext profile metadata when SecureStore migration fails", async () => {
+    const originalProfiles = JSON.stringify([
+      {
+        id: "worker-a",
+        name: "账号 A",
+        workerUrl: "https://worker-a.example.com",
+        frontendUrl: "",
+        adminPassword: "still-readable",
+        sitePassword: "",
+        domains: [],
+        status: "connected",
+      },
+    ]);
+    (SecureStore.isAvailableAsync as any).mockResolvedValue(true);
+    (SecureStore.setItemAsync as any).mockRejectedValue(new Error("keystore unavailable"));
+    (AsyncStorage.getItem as any).mockImplementation((key: string) =>
+      Promise.resolve(key === "cloudmail_worker_profiles" ? originalProfiles : null)
+    );
+
+    const profiles = await getWorkerProfiles();
+
+    expect(profiles[0].adminPassword).toBe("still-readable");
+    expect(AsyncStorage.setItem).not.toHaveBeenCalledWith(
+      "cloudmail_worker_profiles",
+      expect.not.stringContaining("still-readable")
+    );
+  });
+
+  it("starts secure credential reads for all profiles concurrently", async () => {
+    const storedProfiles = JSON.stringify([
+      {
+        id: "worker-a",
+        name: "账号 A",
+        workerUrl: "https://worker-a.example.com",
+        frontendUrl: "",
+        domains: [],
+        status: "connected",
+      },
+      {
+        id: "worker-b",
+        name: "账号 B",
+        workerUrl: "https://worker-b.example.com",
+        frontendUrl: "",
+        domains: [],
+        status: "connected",
+      },
+    ]);
+    const pendingReads: ((value: string | null) => void)[] = [];
+    (SecureStore.isAvailableAsync as any).mockResolvedValue(true);
+    (SecureStore.getItemAsync as any).mockImplementation(
+      () =>
+        new Promise<string | null>((resolve) => {
+          pendingReads.push(resolve);
+        })
+    );
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      if (key === "cloudmail_worker_profiles") return Promise.resolve(storedProfiles);
+      if (key === "cloudmail_active_worker_profile_id") return Promise.resolve("worker-a");
+      return Promise.resolve(null);
+    });
+
+    const profilesPromise = getWorkerProfiles();
+    for (let index = 0; index < 5; index += 1) await Promise.resolve();
+
+    expect(SecureStore.getItemAsync).toHaveBeenCalledTimes(4);
+    pendingReads.forEach((resolve) => resolve(null));
+    await expect(profilesPromise).resolves.toHaveLength(2);
+  });
+
+  it("removes SecureStore entries for worker profiles deleted during save", async () => {
+    const storedProfiles = JSON.stringify([
+      {
+        id: "worker-a",
+        name: "账号 A",
+        workerUrl: "https://worker-a.example.com",
+        frontendUrl: "",
+        domains: [],
+        status: "connected",
+      },
+      {
+        id: "worker-b",
+        name: "账号 B",
+        workerUrl: "https://worker-b.example.com",
+        frontendUrl: "",
+        domains: [],
+        status: "connected",
+      },
+    ]);
+    (SecureStore.isAvailableAsync as any).mockResolvedValue(true);
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      if (key === "cloudmail_worker_profiles") return Promise.resolve(storedProfiles);
+      if (key === "cloudmail_active_worker_profile_id") return Promise.resolve("worker-a");
+      return Promise.resolve(null);
+    });
+
+    await saveWorkerProfiles([
+      {
+        id: "worker-a",
+        name: "账号 A",
+        workerUrl: "https://worker-a.example.com",
+        frontendUrl: "",
+        adminPassword: "admin-a",
+        sitePassword: "",
+        domains: [],
+        status: "connected",
+      },
+    ]);
+
+    expect(SecureStore.deleteItemAsync).toHaveBeenCalledWith(
+      workerCredentialKey("worker-b", "admin")
+    );
+    expect(SecureStore.deleteItemAsync).toHaveBeenCalledWith(
+      workerCredentialKey("worker-b", "site")
+    );
+  });
 });
 
 describe("getAccounts / saveAccounts", () => {
@@ -237,6 +418,80 @@ describe("getAccounts / saveAccounts", () => {
     const accounts = await getAccounts();
     expect(accounts).toEqual(mockAccounts);
     expect(accounts[0].address).toBe("test@example.com");
+  });
+
+  it("migrates account JWT and password to SecureStore without changing the hydrated account", async () => {
+    let storedAccounts = JSON.stringify([
+      {
+        address: "secure@example.com",
+        jwt: "address-jwt",
+        password: "address-password",
+        createdAt: "2024-01-01",
+        workerProfileId: "worker-a",
+      },
+    ]);
+    (SecureStore.isAvailableAsync as any).mockResolvedValue(true);
+    (AsyncStorage.getItem as any).mockImplementation((key: string) =>
+      Promise.resolve(key === "cloudmail_accounts" ? storedAccounts : null)
+    );
+    (AsyncStorage.setItem as any).mockImplementation((key: string, value: string) => {
+      if (key === "cloudmail_accounts") storedAccounts = value;
+      return Promise.resolve(undefined);
+    });
+
+    const accounts = await getAccounts();
+
+    expect(accounts[0]).toMatchObject({ jwt: "address-jwt", password: "address-password" });
+    expect(storedAccounts).not.toContain("address-jwt");
+    expect(storedAccounts).not.toContain("address-password");
+  });
+
+  it("does not replace account metadata when secure credential persistence fails", async () => {
+    (SecureStore.isAvailableAsync as any).mockResolvedValue(true);
+    (SecureStore.setItemAsync as any).mockRejectedValue(new Error("keystore unavailable"));
+
+    await expect(
+      saveAccounts([
+        { address: "safe@example.com", jwt: "must-not-be-lost", createdAt: "2024-01-01" },
+      ])
+    ).rejects.toThrow("keystore unavailable");
+    expect(AsyncStorage.setItem).not.toHaveBeenCalledWith(
+      "cloudmail_accounts",
+      expect.any(String)
+    );
+  });
+
+  it("starts secure credential reads for all accounts concurrently", async () => {
+    const storedAccounts = JSON.stringify([
+      {
+        address: "first@example.com",
+        createdAt: "2024-01-01",
+        workerProfileId: "worker-a",
+      },
+      {
+        address: "second@example.com",
+        createdAt: "2024-01-02",
+        workerProfileId: "worker-a",
+      },
+    ]);
+    const pendingReads: ((value: string | null) => void)[] = [];
+    (SecureStore.isAvailableAsync as any).mockResolvedValue(true);
+    (SecureStore.getItemAsync as any).mockImplementation(
+      () =>
+        new Promise<string | null>((resolve) => {
+          pendingReads.push(resolve);
+        })
+    );
+    (AsyncStorage.getItem as any).mockImplementation((key: string) =>
+      Promise.resolve(key === "cloudmail_accounts" ? storedAccounts : null)
+    );
+
+    const accountsPromise = getAccounts();
+    for (let index = 0; index < 5; index += 1) await Promise.resolve();
+
+    expect(SecureStore.getItemAsync).toHaveBeenCalledTimes(4);
+    pendingReads.forEach((resolve) => resolve(null));
+    await expect(accountsPromise).resolves.toHaveLength(2);
   });
 });
 
@@ -336,6 +591,34 @@ describe("addAccount", () => {
       jwt: "jwt-b-new",
       workerProfileId: "worker-b",
     });
+  });
+});
+
+describe("removeAccount", () => {
+  it("does not delete shared SecureStore entries while a duplicate identity remains", async () => {
+    const storedAccounts = JSON.stringify([
+      {
+        address: "duplicate@example.com",
+        createdAt: "2024-01-01",
+        workerProfileId: "worker-a",
+      },
+      {
+        address: "duplicate@example.com",
+        createdAt: "2024-01-02",
+        workerProfileId: "worker-a",
+      },
+    ]);
+    (SecureStore.isAvailableAsync as any).mockResolvedValue(true);
+    (SecureStore.getItemAsync as any).mockResolvedValue("stored-credential");
+    (AsyncStorage.getItem as any).mockImplementation((key: string) => {
+      if (key === "cloudmail_accounts") return Promise.resolve(storedAccounts);
+      if (key === "cloudmail_active_account_index") return Promise.resolve("0");
+      return Promise.resolve(null);
+    });
+
+    await removeAccount(0);
+
+    expect(SecureStore.deleteItemAsync).not.toHaveBeenCalled();
   });
 });
 
@@ -590,6 +873,32 @@ describe("adminLogin", () => {
     expect((global.fetch as any).mock.calls[0][0]).toBe(
       "https://worker-header.example.com/admin/statistics"
     );
+  });
+
+  it("reports credential rejection when a legacy Worker lacks the open login route", async () => {
+    (AsyncStorage.getItem as any).mockImplementation((key: string) =>
+      Promise.resolve(
+        key === "cloudmail_worker_url"
+          ? "https://worker-auth-error.example.com"
+          : null
+      )
+    );
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        text: () => Promise.resolve("missing"),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        text: () => Promise.resolve("admin password rejected"),
+      });
+
+    await expect(adminLogin("wrong-password")).rejects.toMatchObject({
+      status: 401,
+      path: "/admin/statistics",
+    });
   });
 });
 

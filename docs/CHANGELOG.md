@@ -2,6 +2,36 @@
 
 本文件记录 CloudMail 的主要公开版本变化。
 
+## V1.1.3 - 2026-07-16
+
+V1.1.3 是生产发布加固版本，保持现有业务流程兼容，重点处理本地凭据安全、部署改动后的连接诊断、Android 权限和可复现发布。
+
+### 中文
+
+- Android/iOS 上的 Worker 管理员密码、站点密码、邮箱 JWT 和邮箱密码迁移到 SecureStore；安全写入成功后才清理 AsyncStorage 明文。
+- 多 Worker 与多邮箱凭据读取并行化；删除 Worker 或邮箱后清理不再使用的安全密钥，并保护共享身份的凭据不被误删。
+- 测试连接可区分站点密码错误、管理员密码错误、后端接口不兼容、超时、限流和 Worker 服务异常。
+- 移除未使用的通知、音频、视频和图片模块，显式阻止通知、录音、开机启动、唤醒锁、存储和悬浮窗权限。
+- Android 关闭应用数据备份；设置页新增隐私政策和使用条款入口。
+- CI 增加 Lint、生产 Web 导出、干净 Android Release 编译、最终 Manifest 和 SecureStore 依赖核验。
+- 版本升级到 `1.1.3`，Android `versionCode` 与 iOS `buildNumber` 升级到 `17`。
+- 修复 Web 主题 Hook 条件调用，并清理影响发布门禁的 Lint 警告。
+
+### English
+
+- Migrated Worker admin/site passwords and mailbox JWTs/passwords to SecureStore on Android/iOS, removing plaintext only after secure writes succeed.
+- Parallelized secure reads, cleaned up orphaned keys, and preserved credentials shared by duplicate mailbox identities.
+- Added precise diagnostics for site/admin password failures, incompatible APIs, timeouts, rate limits, and Worker errors.
+- Removed unused notification, audio, video, and image modules and blocked unrelated Android permissions.
+- Disabled Android app-data backup and added privacy/terms links in Settings.
+- Expanded CI with lint, production Web export, clean Android Release compilation, final manifest checks, and SecureStore dependency verification.
+- Bumped the app to `1.1.3` with Android/iOS build number `17`.
+- Fixed conditional Web theme-hook usage and removed release-gate lint warnings.
+
+### 签名迁移 / Signing migration
+
+V1.1.2 及更早 GitHub APK 使用调试证书。V1.1.3 起使用 EAS 生产证书，Android 不允许两种证书互相覆盖安装。旧版用户必须先记录 Worker 配置并复制需要保留的邮箱凭证，再卸载旧版并安装 V1.1.3。
+
 ## V1.1.2 - 2026-05-07
 
 V1.1.2 是一次稳定性和性能体验版本，重点解决首次保存进入后台卡住、地址页无持久缓存、刷新指示重复和远端删除同步不及时等问题。

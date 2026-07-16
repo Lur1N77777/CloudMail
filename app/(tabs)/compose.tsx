@@ -9,8 +9,8 @@ import {
   Switch,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
 } from "react-native";
-import { Pressable } from "react-native";
 
 import { ScreenContainer } from "@/components/screen-container";
 import { TabSwipeScreen } from "@/components/tab-swipe-screen";

@@ -20,18 +20,20 @@ import { ENV } from "./env";
 
 export type GenerateImageOptions = {
   prompt: string;
-  originalImages?: Array<{
+  originalImages?: {
     url?: string;
     b64Json?: string;
     mimeType?: string;
-  }>;
+  }[];
 };
 
 export type GenerateImageResponse = {
   url?: string;
 };
 
-export async function generateImage(options: GenerateImageOptions): Promise<GenerateImageResponse> {
+export async function generateImage(
+  options: GenerateImageOptions,
+): Promise<GenerateImageResponse> {
   if (!ENV.forgeApiUrl) {
     throw new Error("BUILT_IN_FORGE_API_URL is not configured");
   }
@@ -40,8 +42,13 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   }
 
   // Build the full URL by appending the service path to the base URL
-  const baseUrl = ENV.forgeApiUrl.endsWith("/") ? ENV.forgeApiUrl : `${ENV.forgeApiUrl}/`;
-  const fullUrl = new URL("images.v1.ImageService/GenerateImage", baseUrl).toString();
+  const baseUrl = ENV.forgeApiUrl.endsWith("/")
+    ? ENV.forgeApiUrl
+    : `${ENV.forgeApiUrl}/`;
+  const fullUrl = new URL(
+    "images.v1.ImageService/GenerateImage",
+    baseUrl,
+  ).toString();
 
   const response = await fetch(fullUrl, {
     method: "POST",
@@ -74,7 +81,11 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   const buffer = Buffer.from(base64Data, "base64");
 
   // Save to S3
-  const { url } = await storagePut(`generated/${Date.now()}.png`, buffer, result.image.mimeType);
+  const { url } = await storagePut(
+    `generated/${Date.now()}.png`,
+    buffer,
+    result.image.mimeType,
+  );
   return {
     url,
   };
