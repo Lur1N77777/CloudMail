@@ -88,7 +88,6 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -98,6 +97,9 @@ jobs:
           EXPO_NO_DOTENV: "1"
           NODE_ENV: production
         run: pnpm exec expo prebuild --platform android --clean --no-install
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Build release APK
         env:
