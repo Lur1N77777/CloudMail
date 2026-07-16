@@ -80,7 +80,7 @@
     "@types/react": "~19.1.17",
     "concurrently": "^9.2.1",
     "cross-env": "^7.0.3",
-    "drizzle-kit": "^0.31.8",
+    "drizzle-kit": "^0.31.10",
     "esbuild": "^0.25.12",
     "eslint": "^9.39.2",
     "eslint-config-expo": "~10.0.0",
