@@ -53,7 +53,7 @@ jobs:
         env:
           EXPO_NO_DOTENV: "1"
           NODE_ENV: production
-        run: pnpm exec expo export --platform web --output-dir dist-web --clear
+        run: pnpm exec expo export --platform web --output-dir dist-web
 
       - name: Upload web artifact
         uses: actions/upload-artifact@v4
