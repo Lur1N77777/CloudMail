@@ -1,6 +1,6 @@
 # CloudMail 构建与安装指南
 
-这是一个 Expo + React Native 项目，要生成可以直接安装的 Android APK，有两条路子：**EAS 云端构建**（推荐）和**本地 Gradle 构建**（需 Android SDK）。
+这是一个 Expo + React Native 项目。公开发布必须使用 **EAS 云端构建**保存的生产密钥；本地 Gradle 构建仅用于编译、Manifest 和兼容性验证。
 
 ---
 
@@ -22,24 +22,25 @@ eas login
 
 没账号就去 [expo.dev](https://expo.dev) 免费注册一个。
 
-### 3. 初次绑定项目
+### 3. 确认项目绑定
 
 ```powershell
 cd cloudmail
-eas init
+eas project:info
 ```
 
-这一步会往 `app.config.ts` 的 `extra.eas.projectId` 里写入 project id，按提示确认即可。
+当前仓库已绑定 `@loven7/cloudmail`，Project ID 为 `02aa1a6e-d427-460a-878f-0145614afd2a`。不要重新创建 EAS 项目或替换 `app.config.ts` 中的 Project ID。
 
-### 4. 构建 APK
+### 4. 构建生产 AAB 与侧载 APK
 
 ```powershell
+eas build --platform android --profile production --non-interactive --wait
 eas build --platform android --profile apk
 ```
 
-- 等 10~20 分钟
-- 完成后会在终端打印一个 URL，点进去下载 `.apk` 文件
-- `eas.json` 里的 `apk` profile 已经配置成直出 APK（不是 AAB）
+- `production` 生成 Google Play 所需 `.aab`。
+- `apk` 生成 GitHub Release/侧载所需 `.apk`，使用与 AAB 相同的 EAS 生产密钥。
+- 构建完成后必须核验包名、版本、权限和签名证书，再上传发行版。
 
 ### 5. 安装到手机
 
@@ -80,7 +81,18 @@ cd android
 # android/app/build/outputs/apk/release/app-release.apk
 ```
 
-> **签名密钥**：首次构建会在 `android/app/` 下生成 debug keystore。要发布正式版，换成你自己的 keystore，或让 Gradle 自动管理。
+> **签名密钥**：managed prebuild 生成的本地 Release 默认使用 debug keystore。它只能作为 CI/本地验证制品，禁止上传为正式发行版。正式版使用 EAS 中已有的私有生产 keystore。
+
+### 验证 APK
+
+```powershell
+$buildTools = "$env:ANDROID_HOME\build-tools\36.0.0"
+& "$buildTools\aapt2.exe" dump badging .\cloudmail-v1.1.3-secure.apk
+& "$buildTools\aapt2.exe" dump permissions .\cloudmail-v1.1.3-secure.apk
+& "$buildTools\apksigner.bat" verify --verbose --print-certs .\cloudmail-v1.1.3-secure.apk
+```
+
+应确认包名为 `space.manus.cloudmail.t20260418184046`，版本为 `1.1.3 (17)`，没有通知、录音、开机启动、唤醒锁、存储或悬浮窗权限，证书 SHA-256 为 `5B:F4:BF:3A:49:73:2D:2A:5A:D1:F9:57:FB:D7:62:7F:E2:13:78:6E:1F:8B:35:7A:6E:E1:15:78:15:68:CE:EB`。
 
 ---
 
@@ -98,7 +110,7 @@ npx expo start
 # 4. 手机 Expo Go 扫描终端里的二维码
 ```
 
-> **注意**：Expo Go 里运行时，某些原生模块（如 expo-notifications 的推送）可能受限。正式体验还是建议走 APK。
+> **注意**：Expo Go 不提供与生产包完全相同的 SecureStore 和原生构建环境。正式验收请使用 EAS APK 或 AAB 安装包。
 
 ---
 

@@ -39,10 +39,15 @@ const env = {
 };
 
 const config: ExpoConfig = {
+  owner: "loven7",
   name: env.appName,
   slug: env.appSlug,
-  version: "1.1.2",
+  version: "1.1.3",
   extra: {
+    privacyPolicyUrl:
+      "https://github.com/Lur1N77777/CloudMail/blob/main/docs/PRIVACY.md",
+    termsOfServiceUrl:
+      "https://github.com/Lur1N77777/CloudMail/blob/main/docs/TERMS.md",
     eas: {
       projectId: "02aa1a6e-d427-460a-878f-0145614afd2a",
     },
@@ -55,13 +60,26 @@ const config: ExpoConfig = {
   ios: {
     supportsTablet: true,
     bundleIdentifier: env.iosBundleId,
-    buildNumber: "16",
+    buildNumber: "17",
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
     },
   },
   android: {
-    versionCode: 16,
+    versionCode: 17,
+    allowBackup: false,
+    blockedPermissions: [
+      "android.permission.POST_NOTIFICATIONS",
+      "android.permission.RECORD_AUDIO",
+      "android.permission.MODIFY_AUDIO_SETTINGS",
+      "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+      "android.permission.RECEIVE_BOOT_COMPLETED",
+      "android.permission.WAKE_LOCK",
+      "com.google.android.c2dm.permission.RECEIVE",
+      "android.permission.READ_EXTERNAL_STORAGE",
+      "android.permission.WRITE_EXTERNAL_STORAGE",
+      "android.permission.SYSTEM_ALERT_WINDOW",
+    ],
     adaptiveIcon: {
       backgroundColor: "#F8F1E8",
       foregroundImage: "./assets/images/android-icon-foreground.png",
@@ -71,7 +89,6 @@ const config: ExpoConfig = {
     edgeToEdgeEnabled: true,
     predictiveBackGestureEnabled: false,
     package: env.androidPackage,
-    permissions: ["POST_NOTIFICATIONS"],
     intentFilters: [
       {
         action: "VIEW",
@@ -95,20 +112,6 @@ const config: ExpoConfig = {
     "expo-asset",
     "expo-font",
     "expo-router",
-    [
-      "expo-audio",
-      {
-        microphonePermission:
-          "Allow $(PRODUCT_NAME) to access your microphone.",
-      },
-    ],
-    [
-      "expo-video",
-      {
-        supportsBackgroundPlayback: true,
-        supportsPictureInPicture: true,
-      },
-    ],
     [
       "expo-splash-screen",
       {

@@ -7,9 +7,18 @@ on:
       - main
       - master
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
+  quality:
+    name: Quality and web build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,3 +42,100 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build optional server bundle
+        run: pnpm build
+
+      - name: Export production web bundle
+        env:
+          EXPO_NO_DOTENV: "1"
+          NODE_ENV: production
+        run: pnpm exec expo export --platform web --output-dir dist-web --clear
+
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudmail-web
+          path: dist-web
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: Android release compile
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Android project
+        env:
+          EXPO_NO_DOTENV: "1"
+          NODE_ENV: production
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+
+      - name: Build release APK
+        env:
+          EXPO_NO_DOTENV: "1"
+          NODE_ENV: production
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify merged manifest
+        shell: bash
+        run: |
+          manifest="android/app/build/intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml"
+          test -f "$manifest"
+          grep -q 'android:allowBackup="false"' "$manifest"
+          for permission in \
+            android.permission.POST_NOTIFICATIONS \
+            android.permission.RECORD_AUDIO \
+            android.permission.MODIFY_AUDIO_SETTINGS \
+            android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK \
+            android.permission.RECEIVE_BOOT_COMPLETED \
+            android.permission.WAKE_LOCK \
+            com.google.android.c2dm.permission.RECEIVE \
+            android.permission.READ_EXTERNAL_STORAGE \
+            android.permission.WRITE_EXTERNAL_STORAGE \
+            android.permission.SYSTEM_ALERT_WINDOW; do
+            if grep -q "$permission" "$manifest"; then
+              echo "Forbidden Android permission found: $permission"
+              exit 1
+            fi
+          done
+          dependencies="android/app/build/outputs/sdk-dependencies/release/sdkDependencies.txt"
+          test -f "$dependencies"
+          grep -q 'artifactId: "expo.modules.securestore"' "$dependencies"
+
+      - name: Upload CI APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudmail-android-ci-debug-signed
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 7

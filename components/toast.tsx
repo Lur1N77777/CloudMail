@@ -1,5 +1,5 @@
 import React, { useEffect } from "react";
-import { Text, View, StyleSheet } from "react-native";
+import { Text, StyleSheet } from "react-native";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -38,7 +38,7 @@ export function Toast({ message, type = "info", onDismiss }: ToastProps) {
       translateY.value = -100;
       opacity.value = 0;
     }
-  }, [message]);
+  }, [message, onDismiss, opacity, translateY]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: translateY.value }],

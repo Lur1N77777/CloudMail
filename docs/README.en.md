@@ -3,7 +3,7 @@
 
 # CloudMail
 
-**V1.1.2 · Faster and more stable mobile admin app for Cloudflare Temp Email systems**
+**V1.1.3 · Production-hardened mobile admin app for Cloudflare Temp Email systems**
 
 [![CI](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml/badge.svg)](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
@@ -25,18 +25,16 @@ The upstream project provides the Cloudflare Worker mailbox backend, web admin U
 
 CloudMail is **administrator-first**: first launch opens admin setup, and a valid configuration opens the admin console directly.
 
-## What's new in V1.1.2
+## What's new in V1.1.3
 
-V1.1.2 focuses on first-run reliability, refresh behavior, and large-data administration. The admin console now opens faster, keeps cached content visible, and behaves better when managing many mailboxes.
+V1.1.3 hardens credential storage, connection diagnostics, Android permissions, and the release pipeline while preserving existing Worker, mailbox, and admin workflows.
 
-- **Faster admin entry**: saving Workers configuration now writes local settings first and opens the admin console immediately. Admin re-checks, statistics, and warm-up requests run later on demand instead of blocking the setup button.
-- **Cache-first address page**: the address list now has persisted cache. It shows the last known data first, then refreshes in the background, so returning after deletes or page switches no longer flashes to an empty list.
-- **Remote deletion sync**: background refresh treats the server's first page as authoritative for the visible window, so addresses and mail deleted from the web admin are corrected on mobile refresh instead of staying in cache forever.
-- **More stable large address sets**: the full address index used by groups/search now has cache support, and pagination offsets are corrected after delete/batch actions to avoid empty locked lists with 800+ addresses.
-- **Mail cache and incremental refresh**: inbox, sent, unknown, and single-address mail lists continue to use cache-first rendering, paged loading, and background incremental updates for faster first paint.
-- **One-tap login links**: Worker profiles can store the web frontend URL, and address lists/details can copy a direct login link for quick browser or device handoff.
-- **Cleaner refresh UI**: duplicate top “updating” indicators were removed. Each page now keeps one pull-to-refresh or footer spinner, with themed RefreshControl backgrounds for dark and OLED black modes.
-- **Time display fix**: Worker timestamps are parsed consistently and displayed in Shanghai time, preventing list timestamps from disagreeing with the detail view.
+- **OS-backed credential storage**: Worker admin/site passwords plus mailbox JWTs/passwords migrate to SecureStore on Android and iOS. Migration writes secure values before removing plaintext, preserving the old source if any secure operation fails.
+- **Actionable connection diagnostics**: Worker tests now distinguish site-password rejection, admin-password rejection, incompatible routes, timeouts, rate limits, and Worker 5xx responses.
+- **Reduced permissions and native surface**: unused notification, audio, video, and image modules were removed. Notification, recording, boot, wake-lock, storage, and overlay permissions are explicitly blocked, and Android app-data backup is disabled.
+- **Published legal information**: Settings now links to the privacy policy and terms, including the different storage guarantees of native and Web builds.
+- **Production release gates**: CI now runs type checking, 91 automated tests, lint, a production Web export, a clean Android Release compile, and final manifest/SecureStore dependency checks.
+- **Reliability details**: secure reads are parallelized across Workers and accounts, deleted profiles clean up their keys, and the Web theme hook now follows stable hook ordering.
 
 ## Highlights
 
@@ -72,6 +70,8 @@ Click any thumbnail to open the full-size image.
 Download the latest APK from [GitHub Releases](https://github.com/Lur1N77777/CloudMail/releases).
 
 APK files are intentionally not committed to the source repository. This keeps the Git history small and makes releases easier to audit.
+
+> **Upgrade notice for V1.1.2 and older**: legacy APKs were debug-signed and cannot be installed over the production-signed V1.1.3 build. Before uninstalling, record your Worker settings and copy every mailbox credential you still need. Then uninstall the legacy app, install V1.1.3, and configure or import those credentials again.
 
 ## Use the app after downloading it
 

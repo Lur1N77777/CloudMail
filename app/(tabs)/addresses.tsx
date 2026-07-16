@@ -10,8 +10,9 @@ import {
   Switch,
   Modal,
   ScrollView,
+  Pressable,
+  Platform,
 } from "react-native";
-import { Pressable } from "react-native";
 
 import { ScreenContainer } from "@/components/screen-container";
 import { TabSwipeScreen } from "@/components/tab-swipe-screen";
@@ -22,7 +23,6 @@ import { useMail } from "@/lib/mail-context";
 import type { MailAccount } from "@/lib/api";
 import { buildMailboxName, normalizeMailboxPrefix } from "@/lib/mailbox-name";
 import * as Haptics from "expo-haptics";
-import { Platform } from "react-native";
 
 async function copyToClipboard(text: string) {
   try {
@@ -76,9 +76,15 @@ export default function AddressesScreen() {
   // ── View current credential modal ──
   const [viewAccount, setViewAccount] = useState<MailAccount | null>(null);
 
-  const domains = state.settings?.domains || [];
-  const domainLabels = state.settings?.domainLabels || [];
-  const randomSubdomainDomains = state.settings?.randomSubdomainDomains || [];
+  const domains = useMemo(() => state.settings?.domains || [], [state.settings?.domains]);
+  const domainLabels = useMemo(
+    () => state.settings?.domainLabels || [],
+    [state.settings?.domainLabels]
+  );
+  const randomSubdomainDomains = useMemo(
+    () => state.settings?.randomSubdomainDomains || [],
+    [state.settings?.randomSubdomainDomains]
+  );
 
   const domainItems = useMemo(
     () =>

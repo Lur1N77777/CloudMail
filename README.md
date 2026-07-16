@@ -3,7 +3,7 @@
 <div align="center">
   <img src="./assets/images/icon.png" alt="CloudMail logo" width="96" height="96" />
 
-**V1.1.2 · 更快更稳的 Cloudflare Temp Email 移动端管理员 App**
+**V1.1.3 · 安全存储与生产发布加固的 Cloudflare Temp Email 移动管理员 App**
 
 [![CI](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml/badge.svg)](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
@@ -25,18 +25,16 @@ CloudMail 是一个面向 **Cloudflare Temp Email / Cloudflare 临时邮箱** �
 
 CloudMail 当前主流程是 **管理员优先**：首次启动进入管理员设置，配置并校验成功后直接进入管理员后台，普通用户欢迎页不再作为主入口。
 
-## V1.1.2 更新重点
+## V1.1.3 更新重点
 
-V1.1.2 重点修复首次进入、刷新体验和大量数据场景下的稳定性，让管理员后台更快进入、更少空白、更适合长期管理大量邮箱。
+V1.1.3 面向正式公开发布，重点加固本地凭据、连接诊断、Android 权限和可复现发布流程，同时保持原有 Worker、邮箱和管理员操作兼容。
 
-- **进入后台更快**：保存 Workers 配置后先完成本地配置写入并立即进入管理员后台，重校验、统计和预热请求改为后台按需执行，避免首次点击“保存并进入管理员后台”长时间卡住。
-- **地址页缓存优先**：地址列表新增持久化缓存，进入地址页会先显示上次数据，再后台刷新；删除、批量操作或切换页面后不再先空白再重新加载。
-- **远端删除同步**：后台刷新会以服务端第一页为权威同步当前可见数据，网页端已删除的地址和邮件会在手机端刷新时被校正，不会长期残留旧缓存。
-- **大量地址更稳**：地址全量索引和分组/搜索视图加入缓存，800+ 地址场景下分组、搜索和用户筛选更稳定；删除后会同步回退分页位置，避免列表被锁成空白。
-- **邮件缓存与增量刷新**：收件、发件、未知和单地址邮件列表继续采用缓存优先、分页加载和后台增量更新，优先保证首屏响应速度。
-- **一键登录链接**：Worker 档案可配置网页版邮箱地址，地址列表和地址详情可直接复制登录链接，便于把邮箱快速交给浏览器或其他设备使用。
-- **刷新视觉统一**：移除顶部重复“更新中”动画，只保留下拉刷新或列表底部一个刷新指示；深色和 OLED 黑模式下刷新圆形背景同步适配主题。
-- **时间显示修复**：统一 Worker 时间解析和上海时间显示，避免列表外层时间与详情页时间不一致。
+- **系统级凭据保护**：Android/iOS 上的 Worker 管理员密码、站点密码、邮箱 JWT 和邮箱密码迁移到 SecureStore；迁移采用先安全写入、后清理明文的顺序，失败时保留旧数据避免丢失。
+- **连接错误更准确**：测试 Worker 时区分站点密码、管理员密码、接口版本不兼容、超时、限流和 Worker 5xx，减少改动部署后反复猜密码的问题。
+- **权限与体积收敛**：移除未使用的通知、音视频和图片模块，禁止通知、录音、开机启动、唤醒锁、存储和悬浮窗等无关权限，并关闭 Android 应用数据备份。
+- **法律信息可访问**：设置页新增隐私政策和使用条款入口，公开说明原生端与 Web 端的数据存储差异。
+- **生产发布门禁**：CI 新增类型检查、91 项自动化测试、Lint、生产 Web 导出、干净 Android Release 编译、Manifest 与 SecureStore 依赖核验。
+- **稳定性细节**：并行读取多 Worker/多邮箱安全凭据，清理已删除配置的密钥，并修复 Web 主题 Hook 的调用顺序。
 
 ## 功能亮点
 
@@ -72,6 +70,8 @@ V1.1.2 重点修复首次进入、刷新体验和大量数据场景下的稳定�
 从 [GitHub Releases](https://github.com/Lur1N77777/CloudMail/releases) 下载最新版 APK。
 
 APK 不直接提交到源码仓库，构建产物通过 GitHub Releases 分发，以保持 Git 历史干净。
+
+> **V1.1.2 及更早版本升级提示**：旧 APK 使用调试证书签名，无法直接覆盖安装使用生产证书的 V1.1.3。升级前请记录 Worker 配置，并逐个复制仍需保留的邮箱凭证；随后卸载旧版、安装 V1.1.3，再重新配置或导入。不要在未备份凭据时卸载旧版。
 
 ## 使用方式
 
@@ -154,6 +154,7 @@ pnpm dev:metro
 ```bash
 pnpm check
 pnpm test
+pnpm lint
 ```
 
 ## 构建 Android APK
@@ -162,12 +163,12 @@ pnpm test
 
 ```bash
 pnpm install
-npx expo prebuild -p android --clean
+EXPO_NO_DOTENV=1 NODE_ENV=production npx expo prebuild -p android --clean
 cd android
-./gradlew assembleRelease
+NODE_ENV=production ./gradlew assembleRelease
 ```
 
-生成的 APK 建议上传到 GitHub Releases，不要提交到 Git 仓库。
+本地 `assembleRelease` 只用于编译验证，默认仍可能使用调试证书。公开发布必须使用 EAS 中保存的生产密钥，详见 [BUILD.md](./docs/BUILD.md)。
 
 ## 环境变量
 
@@ -186,6 +187,8 @@ cp .env.example .env.local
 - [构建与安装指南](./docs/BUILD.md)
 - [备份与双远程发布流程](./docs/BACKUP_AND_RELEASE.md)
 - [更新日志](./docs/CHANGELOG.md)
+- [隐私政策](./docs/PRIVACY.md)
+- [使用条款](./docs/TERMS.md)
 - [设计说明](./docs/design.md)
 - [邮箱 API 报告](./docs/mailbox-api-report.md)
 - [路线图](./docs/roadmap.md)

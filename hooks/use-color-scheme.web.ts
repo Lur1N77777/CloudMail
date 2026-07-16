@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useThemeContext } from "@/lib/theme-provider";
+import { useOptionalThemeContext } from "@/lib/theme-provider";
 
 export function useColorScheme() {
   const [hasHydrated, setHasHydrated] = useState(false);
@@ -8,10 +8,6 @@ export function useColorScheme() {
     setHasHydrated(true);
   }, []);
 
-  try {
-    const { colorScheme } = useThemeContext();
-    return hasHydrated ? colorScheme : "light";
-  } catch {
-    return "light";
-  }
+  const theme = useOptionalThemeContext();
+  return hasHydrated && theme ? theme.colorScheme : "light";
 }

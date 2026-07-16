@@ -5,6 +5,15 @@ import expoConfig from "eslint-config-expo/flat.js";
 export default defineConfig([
   expoConfig,
   {
-    ignores: ["dist/*"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      ".android-sdk/**",
+      ".codex-build-logs/**",
+      ".jdk17/**",
+      ".expo/**",
+      "android/**",
+      "ios/**",
+    ],
   },
 ]);

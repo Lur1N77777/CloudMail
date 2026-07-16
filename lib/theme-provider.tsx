@@ -137,3 +137,7 @@ export function useThemeContext(): ThemeContextValue {
   }
   return ctx;
 }
+
+export function useOptionalThemeContext(): ThemeContextValue | null {
+  return useContext(ThemeContext);
+}
