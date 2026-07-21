@@ -28,7 +28,7 @@
     "@trpc/client": "11.7.2",
     "@trpc/react-query": "11.7.2",
     "@trpc/server": "11.7.2",
-    "axios": "^1.13.2",
+    "axios": "^1.18.0",
     "clsx": "^2.1.1",
     "cookie": "^1.1.1",
     "dotenv": "^16.6.1",
