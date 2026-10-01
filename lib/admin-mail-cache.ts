@@ -9,6 +9,7 @@ import type { ParsedAttachment, ParsedMail } from "./api";
 
 const CACHE_PREFIX = "cloudmail_admin_mail_cache_v1";
 const MAX_CACHED_MAILS = 120;
+const PARSER_VERSION = 1;
 
 export type AdminMailCacheKind = "inbox" | "sendbox" | "unknown" | "spam";
 
@@ -32,6 +33,7 @@ type SummaryMail = {
 };
 
 type AdminMailCachePayload = {
+  parserVersion?: number;
   updatedAt: string;
   count: number;
   offset: number;
@@ -99,6 +101,8 @@ export async function readAdminMailCache(
 
     const parsed = JSON.parse(raw) as AdminMailCachePayload;
     if (!Array.isArray(parsed?.mails)) return null;
+    // Admin summaries discard MIME, so legacy encodings must be refreshed from page zero.
+    if (parsed.parserVersion !== PARSER_VERSION) return null;
 
     const mails = parsed.mails
       .filter((item) => item && typeof item.id === "number")
@@ -124,6 +128,7 @@ export async function writeAdminMailCache(
   entry: AdminMailCacheEntry
 ) {
   const payload: AdminMailCachePayload = {
+    parserVersion: PARSER_VERSION,
     updatedAt: new Date().toISOString(),
     count: entry.count,
     offset: entry.offset,

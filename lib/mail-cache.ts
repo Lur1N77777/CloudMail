@@ -1,9 +1,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import type { ParsedAttachment, ParsedMail } from "./api";
+import { parseMail } from "./mail-parser";
 
 const CACHE_PREFIX = "cloudmail_mail_cache_v2";
 const MAX_CACHED_MAILS = 120;
+const PARSER_VERSION = 1;
 
 type MailCacheBox = "inbox" | "sent";
 
@@ -35,6 +37,7 @@ type SummaryMail = {
 };
 
 type MailCachePayload = {
+  parserVersion?: number;
   updatedAt: string;
   mails: SummaryMail[];
 };
@@ -121,7 +124,7 @@ export async function readMailboxCache(
     const parsed = JSON.parse(raw) as MailCachePayload;
     if (!Array.isArray(parsed?.mails)) return [];
 
-    return parsed.mails
+    const mails: ParsedMail[] = parsed.mails
       .filter((item) => item && typeof item.id === "number")
       .map((item) => ({
         ...item,
@@ -130,6 +133,34 @@ export async function readMailboxCache(
         raw: item.raw || "",
         createdAt: item.createdAt || item.date || new Date().toISOString(),
       }));
+
+    if (parsed.parserVersion !== PARSER_VERSION) {
+      // Keep cached IDs and sync anchors intact; repair bodies from their original MIME.
+      const repaired = await Promise.all(mails.map(async (mail) => {
+        if (!mail.raw) return mail;
+        const decoded = await parseMail({
+          id: mail.id,
+          message_id: mail.messageId,
+          source: "",
+          raw: mail.raw,
+          created_at: mail.createdAt,
+          address: mail.ownerAddress,
+          subject: mail.subject,
+          metadata: mail.metadata,
+        });
+        return {
+          ...mail,
+          ...decoded,
+          from: decoded.from || mail.from,
+          to: decoded.to?.length ? decoded.to : mail.to,
+          attachments: decoded.attachments || mail.attachments,
+        };
+      }));
+      await writeMailboxCache(keyInput, repaired).catch(() => undefined);
+      return repaired;
+    }
+
+    return mails;
   } catch {
     return [];
   }
@@ -140,6 +171,7 @@ export async function writeMailboxCache(
   mails: ParsedMail[]
 ) {
   const payload: MailCachePayload = {
+    parserVersion: PARSER_VERSION,
     updatedAt: new Date().toISOString(),
     mails: toSummaryMails(mails),
   };

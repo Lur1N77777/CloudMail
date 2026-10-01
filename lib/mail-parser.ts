@@ -1,6 +1,7 @@
 import PostalMime from "postal-mime";
 
 import type { ParsedAttachment, ParsedMail, RawMail } from "./api";
+import { ensureMailTextDecoder } from "./mail-text-decoder";
 import { formatShanghaiRelativeDate } from "./time";
 
 type Mailbox = NonNullable<ParsedMail["to"]>[number];
@@ -746,6 +747,7 @@ function parseMimeMail(rawMail: RawMail): ParsedMail {
  * - 发件箱记录：自动识别官方前端使用的 JSON raw 结构（v2 / sendgrid 风格）
  */
 export async function parseMail(rawMail: RawMail): Promise<ParsedMail> {
+  ensureMailTextDecoder();
   const sendPayload = parseSendPayload(rawMail);
   if (sendPayload) {
     return sendPayload;
