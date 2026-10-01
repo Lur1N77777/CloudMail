@@ -2,6 +2,24 @@
 
 本文件记录 CloudMail 的主要公开版本变化。
 
+## V1.1.4 - 2026-10-01
+
+V1.1.4 修复 [#17](https://github.com/Lur1N77777/CloudMail/issues/17) 中中文邮件在 HTML 和纯文本模式下显示乱码的问题。
+
+### 中文
+
+- 为原生端补齐 GB2312、GBK、GB18030、Big5 等字符集解码，正确解析正文、主题、发件人名称和附件名称，并保留附件内容。
+- 旧邮箱缓存从保留的邮件原文重新解析，保留邮件标识、归属信息和增量同步进度；没有原文的旧管理员摘要失效后从第一页重新获取。
+- 增加 Expo 原生解码环境、多字符集、附件、缓存修复及迁移写入失败的回归测试。
+- 版本升级到 `1.1.4`，Android `versionCode` 与 iOS `buildNumber` 升级到 `18`。
+
+### English
+
+- Fixed Chinese email decoding in HTML and plain-text views by adding native support for GB2312, GBK, GB18030, Big5, and other charsets across bodies, subjects, sender names, and attachment names, while preserving attachment bytes.
+- Reparsed legacy mailbox caches from retained source messages without losing IDs, ownership metadata, or incremental sync progress. Invalidated legacy admin summaries without source data so they refresh from page zero.
+- Added regression tests for Expo's native decoder environment, multiple charsets, attachments, cache repair, and failed migration writes.
+- Bumped the app to `1.1.4` with Android/iOS build number `18`.
+
 ## V1.1.3 - 2026-07-16
 
 V1.1.3 是生产发布加固版本，保持现有业务流程兼容，重点处理本地凭据安全、部署改动后的连接诊断、Android 权限和可复现发布。

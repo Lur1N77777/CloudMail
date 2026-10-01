@@ -42,7 +42,7 @@ const config: ExpoConfig = {
   owner: "loven7",
   name: env.appName,
   slug: env.appSlug,
-  version: "1.1.3",
+  version: "1.1.4",
   extra: {
     privacyPolicyUrl:
       "https://github.com/Lur1N77777/CloudMail/blob/main/docs/PRIVACY.md",
@@ -60,13 +60,13 @@ const config: ExpoConfig = {
   ios: {
     supportsTablet: true,
     bundleIdentifier: env.iosBundleId,
-    buildNumber: "17",
+    buildNumber: "18",
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
     },
   },
   android: {
-    versionCode: 17,
+    versionCode: 18,
     allowBackup: false,
     blockedPermissions: [
       "android.permission.POST_NOTIFICATIONS",

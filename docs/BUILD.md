@@ -87,12 +87,12 @@ cd android
 
 ```powershell
 $buildTools = "$env:ANDROID_HOME\build-tools\36.0.0"
-& "$buildTools\aapt2.exe" dump badging .\cloudmail-v1.1.3-secure.apk
-& "$buildTools\aapt2.exe" dump permissions .\cloudmail-v1.1.3-secure.apk
-& "$buildTools\apksigner.bat" verify --verbose --print-certs .\cloudmail-v1.1.3-secure.apk
+& "$buildTools\aapt2.exe" dump badging .\cloudmail-v1.1.4.apk
+& "$buildTools\aapt2.exe" dump permissions .\cloudmail-v1.1.4.apk
+& "$buildTools\apksigner.bat" verify --verbose --print-certs .\cloudmail-v1.1.4.apk
 ```
 
-应确认包名为 `space.manus.cloudmail.t20260418184046`，版本为 `1.1.3 (17)`，没有通知、录音、开机启动、唤醒锁、存储或悬浮窗权限，证书 SHA-256 为 `5B:F4:BF:3A:49:73:2D:2A:5A:D1:F9:57:FB:D7:62:7F:E2:13:78:6E:1F:8B:35:7A:6E:E1:15:78:15:68:CE:EB`。
+应确认包名为 `space.manus.cloudmail.t20260418184046`，版本为 `1.1.4 (18)`，没有通知、录音、开机启动、唤醒锁、存储或悬浮窗权限，证书 SHA-256 与 V1.1.3 生产版一致：`5B:F4:BF:3A:49:73:2D:2A:5A:D1:F9:57:FB:D7:62:7F:E2:13:78:6E:1F:8B:35:7A:6E:E1:15:78:15:68:CE:EB`。
 
 ---
 

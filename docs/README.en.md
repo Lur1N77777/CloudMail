@@ -3,7 +3,7 @@
 
 # CloudMail
 
-**V1.1.3 · Production-hardened mobile admin app for Cloudflare Temp Email systems**
+**V1.1.4 · Chinese email decoding fixes for the Cloudflare Temp Email mobile admin app**
 
 [![CI](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml/badge.svg)](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
@@ -25,16 +25,13 @@ The upstream project provides the Cloudflare Worker mailbox backend, web admin U
 
 CloudMail is **administrator-first**: first launch opens admin setup, and a valid configuration opens the admin console directly.
 
-## What's new in V1.1.3
+## What's new in V1.1.4
 
-V1.1.3 hardens credential storage, connection diagnostics, Android permissions, and the release pipeline while preserving existing Worker, mailbox, and admin workflows.
+V1.1.4 fixes [#17](https://github.com/Lur1N77777/CloudMail/issues/17), where some Chinese emails displayed garbled characters in both HTML and plain-text views.
 
-- **OS-backed credential storage**: Worker admin/site passwords plus mailbox JWTs/passwords migrate to SecureStore on Android and iOS. Migration writes secure values before removing plaintext, preserving the old source if any secure operation fails.
-- **Actionable connection diagnostics**: Worker tests now distinguish site-password rejection, admin-password rejection, incompatible routes, timeouts, rate limits, and Worker 5xx responses.
-- **Reduced permissions and native surface**: unused notification, audio, video, and image modules were removed. Notification, recording, boot, wake-lock, storage, and overlay permissions are explicitly blocked, and Android app-data backup is disabled.
-- **Published legal information**: Settings now links to the privacy policy and terms, including the different storage guarantees of native and Web builds.
-- **Production release gates**: CI now runs type checking, 91 automated tests, lint, a production Web export, a clean Android Release compile, and final manifest/SecureStore dependency checks.
-- **Reliability details**: secure reads are parallelized across Workers and accounts, deleted profiles clean up their keys, and the Web theme hook now follows stable hook ordering.
+- **Chinese charset support**: correctly decodes GB2312, GBK, GB18030, Big5, and other encodings in message bodies, subjects, sender names, and attachment names.
+- **Automatic cache repair**: reparses cached mail that retains its original source while preserving message IDs and incremental sync progress. Admin summaries without source data are fetched again during an online refresh.
+- **Regression coverage**: adds tests for multiple charsets, attachments, and cache migration using Expo's native decoder environment.
 
 ## Highlights
 
@@ -71,7 +68,7 @@ Download the latest APK from [GitHub Releases](https://github.com/Lur1N77777/Clo
 
 APK files are intentionally not committed to the source repository. This keeps the Git history small and makes releases easier to audit.
 
-> **Upgrade notice for V1.1.2 and older**: legacy APKs were debug-signed and cannot be installed over the production-signed V1.1.3 build. Before uninstalling, record your Worker settings and copy every mailbox credential you still need. Then uninstall the legacy app, install V1.1.3, and configure or import those credentials again.
+> **Upgrade notice for V1.1.2 and older**: legacy APKs were debug-signed. Releases from V1.1.3 onward use a production certificate and cannot replace those legacy installations directly. Before uninstalling, record your Worker settings and copy every mailbox credential you still need. Then uninstall the legacy app, install V1.1.4, and configure or import those credentials again.
 
 ## Use the app after downloading it
 

@@ -3,7 +3,7 @@
 <div align="center">
   <img src="./assets/images/icon.png" alt="CloudMail logo" width="96" height="96" />
 
-**V1.1.3 · 安全存储与生产发布加固的 Cloudflare Temp Email 移动管理员 App**
+**V1.1.4 · 修复中文邮件乱码的 Cloudflare Temp Email 移动管理员 App**
 
 [![CI](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml/badge.svg)](https://github.com/Lur1N77777/CloudMail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
@@ -25,16 +25,13 @@ CloudMail 是一个面向 **Cloudflare Temp Email / Cloudflare 临时邮箱** �
 
 CloudMail 当前主流程是 **管理员优先**：首次启动进入管理员设置，配置并校验成功后直接进入管理员后台，普通用户欢迎页不再作为主入口。
 
-## V1.1.3 更新重点
+## V1.1.4 更新重点
 
-V1.1.3 面向正式公开发布，重点加固本地凭据、连接诊断、Android 权限和可复现发布流程，同时保持原有 Worker、邮箱和管理员操作兼容。
+V1.1.4 修复 [#17](https://github.com/Lur1N77777/CloudMail/issues/17) 中部分中文邮件在 HTML 和纯文本模式下显示乱码的问题。
 
-- **系统级凭据保护**：Android/iOS 上的 Worker 管理员密码、站点密码、邮箱 JWT 和邮箱密码迁移到 SecureStore；迁移采用先安全写入、后清理明文的顺序，失败时保留旧数据避免丢失。
-- **连接错误更准确**：测试 Worker 时区分站点密码、管理员密码、接口版本不兼容、超时、限流和 Worker 5xx，减少改动部署后反复猜密码的问题。
-- **权限与体积收敛**：移除未使用的通知、音视频和图片模块，禁止通知、录音、开机启动、唤醒锁、存储和悬浮窗等无关权限，并关闭 Android 应用数据备份。
-- **法律信息可访问**：设置页新增隐私政策和使用条款入口，公开说明原生端与 Web 端的数据存储差异。
-- **生产发布门禁**：CI 新增类型检查、91 项自动化测试、Lint、生产 Web 导出、干净 Android Release 编译、Manifest 与 SecureStore 依赖核验。
-- **稳定性细节**：并行读取多 Worker/多邮箱安全凭据，清理已删除配置的密钥，并修复 Web 主题 Hook 的调用顺序。
+- **中文编码兼容**：正确解析 GB2312、GBK、GB18030、Big5 等编码，覆盖邮件正文、主题、发件人名称和附件名称。
+- **旧缓存自动修复**：保留原文的邮箱缓存会重新解析，保留邮件标识和增量同步进度；无法恢复原文的管理员摘要会在联网刷新时重新获取。
+- **回归验证**：增加 Expo 原生解码环境下的多编码、附件和缓存迁移测试，防止同类乱码再次出现。
 
 ## 功能亮点
 
@@ -71,7 +68,7 @@ V1.1.3 面向正式公开发布，重点加固本地凭据、连接诊断、Andr
 
 APK 不直接提交到源码仓库，构建产物通过 GitHub Releases 分发，以保持 Git 历史干净。
 
-> **V1.1.2 及更早版本升级提示**：旧 APK 使用调试证书签名，无法直接覆盖安装使用生产证书的 V1.1.3。升级前请记录 Worker 配置，并逐个复制仍需保留的邮箱凭证；随后卸载旧版、安装 V1.1.3，再重新配置或导入。不要在未备份凭据时卸载旧版。
+> **V1.1.2 及更早版本升级提示**：旧 APK 使用调试证书签名，V1.1.3 起改用生产证书，无法直接覆盖旧版安装。升级前请记录 Worker 配置，并逐个复制仍需保留的邮箱凭证；随后卸载旧版、安装 V1.1.4，再重新配置或导入。不要在未备份凭据时卸载旧版。
 
 ## 使用方式
 

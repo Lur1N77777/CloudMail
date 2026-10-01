@@ -8,10 +8,10 @@ import packageJson from "../../package.json";
 
 describe("production release configuration", () => {
   it("uses the next public version and unique native build number", () => {
-    expect(config.version).toBe("1.1.3");
+    expect(config.version).toBe("1.1.4");
     expect(packageJson.version).toBe(config.version);
-    expect(config.android?.versionCode).toBe(17);
-    expect(config.ios?.buildNumber).toBe("17");
+    expect(config.android?.versionCode).toBe(18);
+    expect(config.ios?.buildNumber).toBe("18");
   });
 
   it("builds the production Android artifact as an app bundle", () => {
