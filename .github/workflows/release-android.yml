@@ -41,7 +41,7 @@ jobs:
           cache: pnpm
 
       - name: Setup Expo and EAS
-        uses: expo/expo-github-action@v8
+        uses: expo/expo-github-action@v9
         with:
           eas-version: 21.0.1
           token: ${{ secrets.EXPO_TOKEN }}
